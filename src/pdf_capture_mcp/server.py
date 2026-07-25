@@ -126,29 +126,34 @@ def setup_vlm(
         config = get_vlm_config()
         enabled = is_vlm_enabled()
         if enabled:
-            return _json({
+            return _json(
+                {
+                    "ok": True,
+                    "configured": True,
+                    "enabled": True,
+                    "model": config.get("model", ""),
+                    "provider": config.get("provider", ""),
+                    "api_base": config.get("api_base", ""),
+                    "validated_at": config.get("validated_at", ""),
+                    "message": f"VLM active: {config.get('provider')}/{config.get('model')}",
+                }
+            )
+        return _json(
+            {
                 "ok": True,
-                "configured": True,
-                "enabled": True,
-                "model": config.get("model", ""),
-                "provider": config.get("provider", ""),
-                "api_base": config.get("api_base", ""),
-                "validated_at": config.get("validated_at", ""),
-                "message": f"VLM active: {config.get('provider')}/{config.get('model')}",
-            })
-        return _json({
-            "ok": True,
-            "configured": False,
-            "enabled": False,
-            "message": (
-                "VLM is not configured. To enable enhanced table/formula extraction, "
-                "call setup_vlm with action='enable', providing a vision-capable model name "
-                "and API endpoint. The model must support image input. "
-                "API key can be set via PDF_CAPTURE_VLM_API_KEY environment variable. "
-                "Using VLM will consume your API tokens. "
-                "Without VLM, rule-based extraction is still available and produces good results."
-            ),
-        })
+                "configured": False,
+                "enabled": False,
+                "message": (
+                    "VLM is not configured. To enable enhanced table/formula extraction, "
+                    "call setup_vlm with action='enable', providing a vision-capable model name "
+                    "and API endpoint. The model must support image input. "
+                    "API key can be set via PDF_CAPTURE_VLM_API_KEY environment variable. "
+                    "Using VLM will consume your API tokens. "
+                    "Without VLM, rule-based extraction is still available "
+                    "and produces good results."
+                ),
+            }
+        )
 
     if action == "disable":
         result = disable_vlm()
@@ -158,36 +163,42 @@ def setup_vlm(
         import os
 
         if not model.strip():
-            return _json({
-                "ok": False,
-                "error": "Model name is required. Provide a vision-capable model "
-                         "(e.g. qwen-vl-max, glm-4v, minimax-m3, gpt-4o).",
-            })
+            return _json(
+                {
+                    "ok": False,
+                    "error": "Model name is required. Provide a vision-capable model "
+                    "(e.g. qwen-vl-max, glm-4v, minimax-m3, gpt-4o).",
+                }
+            )
 
         # Resolve API key: parameter > environment variable
         resolved_key = api_key.strip() or os.getenv("PDF_CAPTURE_VLM_API_KEY", "").strip()
         if not resolved_key:
-            return _json({
-                "ok": False,
-                "error": (
-                    "API key not found. Either:\n"
-                    "  1. Set environment variable: export PDF_CAPTURE_VLM_API_KEY=your_key\n"
-                    "  2. Or pass api_key parameter directly (stored locally, never displayed)."
-                ),
-            })
+            return _json(
+                {
+                    "ok": False,
+                    "error": (
+                        "API key not found. Either:\n"
+                        "  1. Set environment variable: export PDF_CAPTURE_VLM_API_KEY=your_key\n"
+                        "  2. Or pass api_key parameter directly (stored locally, never displayed)."
+                    ),
+                }
+            )
 
         if not api_base.strip():
-            return _json({
-                "ok": False,
-                "error": "API endpoint URL is required. Examples:\n"
-                         "  Qwen-VL: https://dashscope.aliyuncs.com/compatible-mode/v1\n"
-                         "  Zhipu: https://open.bigmodel.cn/api/paas/v4\n"
-                         "  MiniMax: https://api.minimaxi.com/v1\n"
-                         "  Moonshot: https://api.moonshot.cn/v1\n"
-                         "  DeepSeek: https://api.deepseek.com/v1\n"
-                         "  OpenAI: https://api.openai.com/v1\n"
-                         "  Ollama: http://localhost:11434/v1",
-            })
+            return _json(
+                {
+                    "ok": False,
+                    "error": "API endpoint URL is required. Examples:\n"
+                    "  Qwen-VL: https://dashscope.aliyuncs.com/compatible-mode/v1\n"
+                    "  Zhipu: https://open.bigmodel.cn/api/paas/v4\n"
+                    "  MiniMax: https://api.minimaxi.com/v1\n"
+                    "  Moonshot: https://api.moonshot.cn/v1\n"
+                    "  DeepSeek: https://api.deepseek.com/v1\n"
+                    "  OpenAI: https://api.openai.com/v1\n"
+                    "  Ollama: http://localhost:11434/v1",
+                }
+            )
 
         result = do_setup(model=model, api_key=resolved_key, api_base=api_base, provider=provider)
         # SECURITY: strip api_key from response before returning to caller
@@ -379,12 +390,14 @@ def pdf_to_markdown(
         )
 
         if not extract_report.ok:
-            return _json({
-                "ok": False,
-                "error": extract_report.error,
-                "stage": "extract",
-                "engine": eng.name,
-            })
+            return _json(
+                {
+                    "ok": False,
+                    "error": extract_report.error,
+                    "stage": "extract",
+                    "engine": eng.name,
+                }
+            )
 
         # Read extracted markdown
         markdown_text = ""
@@ -429,11 +442,13 @@ def pdf_to_markdown(
         return _json(response)
 
     except Exception as exc:
-        return _json({
-            "ok": False,
-            "error": f"{type(exc).__name__}: {exc}",
-            "traceback": traceback.format_exc()[-500:],
-        })
+        return _json(
+            {
+                "ok": False,
+                "error": f"{type(exc).__name__}: {exc}",
+                "traceback": traceback.format_exc()[-500:],
+            }
+        )
 
 
 # ── Tool 2: extract_tables ──────────────────────────────────────────────────
@@ -519,21 +534,23 @@ def classify_document(pdf_path: str) -> str:
         from pdf_capture_mcp.classifier import classify_document as do_classify
 
         result = do_classify(pdf)
-        return _json({
-            "ok": True,
-            "doc_type": result.doc_type,
-            "confidence": result.confidence,
-            "source": result.source,
-            "has_formulas": result.has_formulas,
-            "has_tables": result.has_tables,
-            "page_count": result.page_count,
-            "language": result.language,
-            "file": {
-                "path": str(pdf),
-                "name": pdf.name,
-                "size_mb": round(pdf.stat().st_size / 1048576, 2),
-            },
-        })
+        return _json(
+            {
+                "ok": True,
+                "doc_type": result.doc_type,
+                "confidence": result.confidence,
+                "source": result.source,
+                "has_formulas": result.has_formulas,
+                "has_tables": result.has_tables,
+                "page_count": result.page_count,
+                "language": result.language,
+                "file": {
+                    "path": str(pdf),
+                    "name": pdf.name,
+                    "size_mb": round(pdf.stat().st_size / 1048576, 2),
+                },
+            }
+        )
 
     except Exception as exc:
         return _json({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
@@ -585,8 +602,7 @@ def pdf_info(pdf_path: str) -> str:
 
             # Scanned detection
             low_text_pages = sum(
-                1 for i in range(min(5, doc.page_count))
-                if len(doc[i].get_text().strip()) < 200
+                1 for i in range(min(5, doc.page_count)) if len(doc[i].get_text().strip()) < 200
             )
             info["is_scanned"] = low_text_pages == min(5, doc.page_count)
 

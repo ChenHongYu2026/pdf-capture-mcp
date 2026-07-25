@@ -92,21 +92,20 @@ def extract_tables(pdf_path: str | Path, *, max_tables: int = 50) -> dict[str, A
                         if not raw_rows or len(raw_rows) < 2:
                             continue
                         # Clean None values
-                        rows = [
-                            [str(cell or "").strip() for cell in row]
-                            for row in raw_rows
-                        ]
+                        rows = [[str(cell or "").strip() for cell in row] for row in raw_rows]
                         score = _score_table(rows)
                         if score < 0.3:
                             continue  # Skip low-quality tables
 
-                        tables.append({
-                            "page": page_idx,
-                            "strategy": strategy,
-                            "markdown": _table_to_markdown(rows),
-                            "rows": rows,
-                            "score": score,
-                        })
+                        tables.append(
+                            {
+                                "page": page_idx,
+                                "strategy": strategy,
+                                "markdown": _table_to_markdown(rows),
+                                "rows": rows,
+                                "score": score,
+                            }
+                        )
                         strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
 
                         if len(tables) >= max_tables:

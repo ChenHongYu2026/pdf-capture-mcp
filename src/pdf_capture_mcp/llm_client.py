@@ -27,6 +27,12 @@ _BASE_DELAY = 2.0
 
 _last_call_ts: float = 0.0
 
+# 1x1 transparent PNG used to probe a model's vision capability
+_TEST_IMAGE_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJ"
+    "AAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+)
+
 
 def _load_config() -> dict[str, Any]:
     """Load persisted VLM configuration."""
@@ -117,9 +123,7 @@ def setup_vlm(
         client = httpx.Client(timeout=30.0)
 
         # Test with a minimal vision request (1x1 transparent PNG)
-        test_image_b64 = (
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-        )
+        test_image_b64 = _TEST_IMAGE_B64
 
         response = client.post(
             f"{api_base.rstrip('/')}/chat/completions",
@@ -214,31 +218,29 @@ def setup_vlm(
         return {"ok": False, "error": f"Validation failed: {type(exc).__name__}: {exc}"}
 
 
-def _setup_vlm_urllib(
-    model: str, api_key: str, api_base: str, provider: str
-) -> dict[str, Any]:
+def _setup_vlm_urllib(model: str, api_key: str, api_base: str, provider: str) -> dict[str, Any]:
     """Fallback VLM setup using urllib (no httpx dependency)."""
     import urllib.request
 
-    test_image_b64 = (
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
-    )
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": 10,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{test_image_b64}"},
-                    },
-                    {"type": "text", "text": "Reply with just: OK"},
-                ],
-            }
-        ],
-    }).encode()
+    test_image_b64 = _TEST_IMAGE_B64
+    payload = json.dumps(
+        {
+            "model": model,
+            "max_tokens": 10,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{test_image_b64}"},
+                        },
+                        {"type": "text", "text": "Reply with just: OK"},
+                    ],
+                }
+            ],
+        }
+    ).encode()
 
     req = urllib.request.Request(
         f"{api_base.rstrip('/')}/chat/completions",
@@ -319,22 +321,24 @@ def call_vlm(
 
     import urllib.request
 
-    payload = json.dumps({
-        "model": model,
-        "max_tokens": max_tokens,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/png;base64,{image_base64}"},
-                    },
-                    {"type": "text", "text": prompt},
-                ],
-            }
-        ],
-    }).encode()
+    payload = json.dumps(
+        {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/png;base64,{image_base64}"},
+                        },
+                        {"type": "text", "text": prompt},
+                    ],
+                }
+            ],
+        }
+    ).encode()
 
     for attempt in range(_MAX_RETRIES):
         try:

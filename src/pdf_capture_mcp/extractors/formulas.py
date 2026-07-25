@@ -39,12 +39,14 @@ def _find_broken_formulas(text: str) -> list[dict[str, Any]]:
     broken = []
     for pattern in _BROKEN_PATTERNS:
         for match in pattern.finditer(text):
-            broken.append({
-                "start": match.start(),
-                "end": match.end(),
-                "text": match.group(),
-                "pattern": pattern.pattern,
-            })
+            broken.append(
+                {
+                    "start": match.start(),
+                    "end": match.end(),
+                    "text": match.group(),
+                    "pattern": pattern.pattern,
+                }
+            )
     return broken
 
 

@@ -146,10 +146,7 @@ class MineruEngine:
                 return ExtractReport(
                     ok=False,
                     engine=self.name,
-                    error=(
-                        "MinerU environment not found. "
-                        "Run: pdf-capture-mcp setup-mineru"
-                    ),
+                    error=("MinerU environment not found. Run: pdf-capture-mcp setup-mineru"),
                 )
             try:
                 python_exe = ensure_mineru_env()
@@ -207,8 +204,13 @@ print("MINERU_SUBPROCESS_OK")
                 for k, v in os.environ.items()
                 if k.upper()
                 not in (
-                    "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
-                    "NO_PROXY", "http_proxy", "https_proxy", "all_proxy",
+                    "HTTP_PROXY",
+                    "HTTPS_PROXY",
+                    "ALL_PROXY",
+                    "NO_PROXY",
+                    "http_proxy",
+                    "https_proxy",
+                    "all_proxy",
                 )
             }
             env["PYTHONPATH"] = ":".join(
@@ -333,9 +335,7 @@ print("MINERU_SUBPROCESS_OK")
             except Exception:
                 pass
 
-        logger.info(
-            "MinerU extraction complete: %d pages, %.1fs", page_count, elapsed
-        )
+        logger.info("MinerU extraction complete: %d pages, %.1fs", page_count, elapsed)
 
         return ExtractReport(
             ok=True,

@@ -1,6 +1,8 @@
+<a id="english"></a>
+
 # pdf-capture-mcp
 
-**English** | [中文](#pdf-capture-mcp-中文)
+**English** | [中文](#chinese)
 
 Multi-phase PDF capture pipeline as an [MCP](https://modelcontextprotocol.io) server.
 Convert PDF documents into high-quality structured Markdown — with formula recognition,
@@ -8,7 +10,7 @@ table extraction, layout cleaning, and a built-in quality gate.
 
 [![CI](https://github.com/ChenHongYu2026/pdf-capture-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ChenHongYu2026/pdf-capture-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
 ## Features
 
@@ -148,9 +150,11 @@ marker (Apache-2.0), pdfplumber (MIT), Table Transformer (MIT), pymupdf4llm (Apa
 
 ---
 
+<a id="chinese"></a>
+
 # pdf-capture-mcp（中文）
 
-[English](#pdf-capture-mcp) | **中文**
+[English](#english) | **中文**
 
 多阶段 PDF 捕获管线，以 [MCP](https://modelcontextprotocol.io) 服务器形式提供。
 将 PDF 文档转换为高质量结构化 Markdown —— 支持公式识别、表格提取、版面清洁和内置质量门控。

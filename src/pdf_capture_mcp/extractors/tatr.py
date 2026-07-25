@@ -98,11 +98,13 @@ def extract_tables_tatr(pdf_path: str, *, max_tables: int = 50) -> dict[str, Any
                 if len(tables) >= max_tables:
                     break
                 x1, y1, x2, y2 = box.tolist()
-                tables.append({
-                    "page": page_idx,
-                    "bbox": [round(x1), round(y1), round(x2), round(y2)],
-                    "confidence": round(float(score), 3),
-                })
+                tables.append(
+                    {
+                        "page": page_idx,
+                        "bbox": [round(x1), round(y1), round(x2), round(y2)],
+                        "confidence": round(float(score), 3),
+                    }
+                )
 
         doc.close()
     except Exception as exc:

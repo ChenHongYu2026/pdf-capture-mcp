@@ -17,9 +17,7 @@ _FOOTER_RE = re.compile(
 )
 
 # TOC patterns
-_TOC_LINE_RE = re.compile(
-    r"^(.{2,60}?)\s*[\.·…]{3,}\s*(\d{1,4})\s*$"
-)
+_TOC_LINE_RE = re.compile(r"^(.{2,60}?)\s*[\.·…]{3,}\s*(\d{1,4})\s*$")
 
 # Orphan section labels (e.g. "3.2" alone on a line, next line is the title)
 _ORPHAN_LABEL_RE = re.compile(r"^(\d+(?:\.\d+){0,3})\s*$")
