@@ -82,7 +82,7 @@ def extract_tables_tatr(pdf_path: str, *, max_tables: int = 50) -> dict[str, Any
             pix = page.get_pixmap(dpi=150)
             from PIL import Image
 
-            img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+            img = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
 
             # Run detection
             inputs = det_processor(images=img, return_tensors="pt").to(device)

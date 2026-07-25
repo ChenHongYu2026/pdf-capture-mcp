@@ -25,8 +25,10 @@ def main() -> None:
         return
 
     # Determine transport
-    transport = "sse" if "--sse" in sys.argv else "stdio"
-    mcp.run(transport=transport)
+    if "--sse" in sys.argv:
+        mcp.run(transport="sse")
+    else:
+        mcp.run(transport="stdio")
 
 
 if __name__ == "__main__":
