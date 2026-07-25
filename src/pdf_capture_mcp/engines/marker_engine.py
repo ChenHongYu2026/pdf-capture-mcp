@@ -1,0 +1,162 @@
+"""Marker engine: PDF-to-Markdown via the marker-pdf library.
+
+Default engine. Requires: pip install marker-pdf (includes PyTorch).
+Models are auto-downloaded to ~/.cache/ on first use.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+from typing import Any
+
+from pdf_capture_mcp.config import get_logger
+from pdf_capture_mcp.types import ExtractReport
+
+logger = get_logger("engines.marker")
+
+# Lazy-loaded model dict (shared across calls to avoid re-initialization)
+_model_dict: Any = None
+
+
+def _get_model_dict() -> Any:
+    """Load marker models once, cache for subsequent calls."""
+    global _model_dict
+    if _model_dict is not None:
+        return _model_dict
+    from marker.models import create_model_dict
+
+    logger.info("Loading marker models (first run may download ~1GB)...")
+    _model_dict = create_model_dict()
+    logger.info("Marker models loaded.")
+    return _model_dict
+
+
+class MarkerEngine:
+    """PDF extraction engine using the marker-pdf library."""
+
+    @property
+    def name(self) -> str:
+        return "marker"
+
+    def is_available(self) -> bool:
+        """Check if marker-pdf is installed."""
+        try:
+            import marker  # noqa: F401
+
+            return True
+        except ImportError:
+            return False
+
+    def extract(
+        self,
+        pdf_path: Path,
+        out_dir: Path,
+        *,
+        enable_formula: bool = True,
+        enable_table: bool = True,
+        language: str = "auto",
+        mode: str = "balanced",
+        disable_ocr: bool = False,
+        force_ocr: bool = False,
+        **kwargs: Any,
+    ) -> ExtractReport:
+        """Extract PDF to Markdown using marker.
+
+        Args:
+            pdf_path: Source PDF file.
+            out_dir: Output directory for markdown + images.
+            enable_formula: Enable inline math / equation OCR.
+            enable_table: Enable table reconstruction.
+            language: Language hint (unused by marker, kept for interface compat).
+            mode: 'balanced' (GPU, highest quality) or 'fast' (CPU-optimized).
+            disable_ocr: Disable all VLM calls (pure text-layer extraction).
+            force_ocr: Force OCR on all pages.
+        """
+        if not self.is_available():
+            return ExtractReport(
+                ok=False,
+                engine=self.name,
+                error="marker-pdf not installed. Run: pip install marker-pdf",
+            )
+
+        out_dir.mkdir(parents=True, exist_ok=True)
+        t0 = time.time()
+
+        try:
+            from marker.config.parser import ConfigParser
+            from marker.converters.pdf import PdfConverter
+            from marker.output import text_from_rendered
+
+            # Build marker config
+            config: dict[str, Any] = {
+                "output_format": "markdown",
+                "mode": mode,
+            }
+            if disable_ocr:
+                config["disable_ocr"] = True
+            if force_ocr:
+                config["force_ocr"] = True
+            if not enable_formula:
+                config["ocr_inline_math"] = False
+
+            config_parser = ConfigParser(config)
+            converter = PdfConverter(
+                config=config_parser.generate_config_dict(),
+                artifact_dict=_get_model_dict(),
+                processor_list=config_parser.get_processors(),
+                renderer=config_parser.get_renderer(),
+            )
+
+            rendered = converter(str(pdf_path))
+            text, _, images = text_from_rendered(rendered)
+
+            # Write markdown output
+            md_path = out_dir / "full_text.md"
+            md_path.write_text(text, encoding="utf-8")
+
+            # Save images
+            images_dir = out_dir / "images"
+            if images:
+                images_dir.mkdir(parents=True, exist_ok=True)
+                for img_name, img_data in images.items():
+                    img_path = images_dir / img_name
+                    if hasattr(img_data, "save"):
+                        img_data.save(str(img_path))
+
+            elapsed = round(time.time() - t0, 2)
+
+            # Count pages from metadata
+            page_count = 0
+            metadata = getattr(rendered, "metadata", {}) or {}
+            if isinstance(metadata, dict):
+                page_count = metadata.get("page_count", 0)
+
+            logger.info(
+                "Marker extraction complete: %d chars, %d images, %.1fs",
+                len(text),
+                len(images) if images else 0,
+                elapsed,
+            )
+
+            return ExtractReport(
+                ok=True,
+                engine=self.name,
+                full_text_md=str(md_path),
+                content_dir=str(out_dir),
+                page_count=page_count,
+                image_count=len(images) if images else 0,
+                table_count=0,  # marker handles tables inline
+                elapsed_seconds=elapsed,
+                metadata={"mode": mode},
+            )
+
+        except Exception as exc:
+            elapsed = round(time.time() - t0, 2)
+            logger.error("Marker extraction failed: %s", exc)
+            return ExtractReport(
+                ok=False,
+                engine=self.name,
+                elapsed_seconds=elapsed,
+                error=f"{type(exc).__name__}: {exc}",
+            )
