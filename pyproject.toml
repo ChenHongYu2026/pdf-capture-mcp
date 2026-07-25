@@ -57,7 +57,8 @@ target-version = "py311"
 select = ["E", "F", "I", "N", "W", "UP"]
 
 [tool.mypy]
-python_version = "3.11"
+# No python_version pin: numpy's type stubs use PEP 695 syntax (3.12+),
+# which mypy rejects when targeting 3.11. Checks run against the active interpreter.
 warn_return_any = true
 warn_unused_configs = true
 ignore_missing_imports = true
