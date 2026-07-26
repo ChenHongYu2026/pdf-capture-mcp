@@ -100,6 +100,7 @@ complex layouts, the agent can install marker on demand (or you can pre-install 
 | `setup_embedding` | Configure an OpenAI-compatible embedding endpoint (OpenAI / MiniMax / BGE / Ollama) |
 | `build_vector_index` | Index a knowledge package into embedded Qdrant (incremental, content-addressed) |
 | `search_corpus` | Semantic search with metadata filters — this tool IS the RAG API |
+| `batch_convert` | Directory-scale conversion (async job): dedup by doc_id, optional vault export + indexing |
 | `get_job_status` | Poll background jobs (large conversions / model downloads) |
 | `download_models` | Pre-download marker models (recommended on slow networks) |
 | `extract_tables` | Table extraction (pdfplumber rules + optional TATR deep learning) |
@@ -436,6 +437,7 @@ Qoder / Claude Desktop / Cursor 用户，在 `mcp.json` 中添加：
 | `setup_embedding` | 配置 OpenAI 兼容嵌入端点（OpenAI / MiniMax / BGE / Ollama） |
 | `build_vector_index` | 将知识包索引进嵌入式 Qdrant（增量、内容寻址） |
 | `search_corpus` | 带元数据过滤的语义检索 —— 该工具即 RAG API |
+| `batch_convert` | 目录级批量转换（异步任务）：doc_id 去重，可选入 vault + 建索引 |
 | `get_job_status` | 轮询后台任务（大文件转换 / 模型下载） |
 | `download_models` | 预下载 marker 模型（慢速网络强烈推荐） |
 | `extract_tables` | 表格提取（pdfplumber 规则 + 可选 TATR 深度学习） |

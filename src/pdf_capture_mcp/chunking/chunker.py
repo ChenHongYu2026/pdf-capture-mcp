@@ -143,7 +143,11 @@ def _parse_blocks(lines: list[str]) -> list[_Block]:
             continue
         m = _HEADING.match(stripped)
         if m:
-            blocks.append(_Block("heading", [m.group(2).strip()], level=len(m.group(1))))
+            # Strip inline HTML (marker's `<span id="page-N"></span>` anchors)
+            # from heading METADATA — the main md keeps them for links, but
+            # heading_path must stay citation-clean (v0.9.0 fix).
+            title = _TAG.sub("", m.group(2)).strip()
+            blocks.append(_Block("heading", [title], level=len(m.group(1))))
             i += 1
             continue
         if stripped.startswith("```"):

@@ -350,3 +350,49 @@ def test_summary_ligature_echo_collapsed():
     # Legitimate distant repetition is untouched
     t = "models are models of the world"
     assert _dedup_ligature_echo(t) == t
+
+
+# ── v0.9.0 polish ───────────────────────────────────────────────────────────
+
+
+def test_heading_path_strips_span_anchors():
+    """marker's <span id=...></span> anchors must not pollute heading_path."""
+    md = '# <span id="page-3-0"></span>Approach\n\nBody text for the approach section goes here.\n'
+    chunks = chunk_markdown(md, DOC)["chunks"]
+    assert chunks[0].heading_path == ["Approach"]
+
+
+def test_heading_tree_strips_span_anchors():
+    from pdf_capture_mcp.packaging import build_heading_tree
+
+    tree = build_heading_tree('## <span id="page-5-1"></span>3.1 Results\n')
+    assert tree[0]["title"] == "3.1 Results"
+
+
+def test_locate_table_region_ignores_stray_hits(tmp_path):
+    """v0.9.0: densest y-band keeps the crop tight around the real table."""
+    from pdf_capture_mcp.quality.vlm_repair import _locate_table_region
+
+    pdf = tmp_path / "s.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    # Stray hit far above the table (citation mentioning a table value)
+    page.insert_text((72, 80), "as shown by value 111 in prior work")
+    # The actual table block, vertically contiguous near the bottom
+    for k, row in enumerate(["name value", "alpha 111", "beta 222", "gamma 333", "delta 444"]):
+        page.insert_text((72, 600 + k * 14), row)
+    doc.save(str(pdf))
+    doc.close()
+
+    lines = [
+        "| name | value |",
+        "|---|---|",
+        "| alpha | 111 |",
+        "| beta | 222 |",
+        "| gamma | 333 |",
+        "| delta | 444 |",
+    ]
+    located = _locate_table_region(pdf, lines)
+    assert located is not None
+    _, rect, _ = located
+    assert rect.y0 > 400  # stray hit at y=80 excluded from the crop

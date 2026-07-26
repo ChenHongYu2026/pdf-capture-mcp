@@ -39,10 +39,11 @@ class TestServerInit:
             assert "setup_embedding" in names
             assert "build_vector_index" in names
             assert "search_corpus" in names
+            assert "batch_convert" in names
             return len(tools)
 
         count = asyncio.run(_check())
-        assert count == 13
+        assert count == 14
 
 
 class TestPdfInfo:
