@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.2] - 2026-07-26
+
+Field report: converted documents looked "formula-free" in math-enabled
+Markdown viewers, which errored with "You can't use macro parameter
+character # in math mode". Root cause: the engine escapes brackets in
+citation-anchor links (`[\[MCCD13,](#page-71-0)`); MathJax/KaTeX renderers
+read `\[` as a display-math opener and choke on the anchor's `#`,
+wrecking formula rendering document-wide (108 collision spans in one
+audited paper). The formulas themselves were intact all along.
+
+### Added
+
+- `MD-108` (warn, auto-fix): citation-link brackets are de-escaped in the
+  sanitizer — `[\[` → `[[` and `\]](` → `]](`. Link-scoped shapes only, so
+  genuine display math (`\[x^2\]`) is never touched; CommonMark rendering
+  is unchanged (brackets still display literally).
+- `MD-108` residual detector: any remaining escaped bracket co-located with
+  an anchor link on the same line is reported for manual review.
+
 ## [0.4.1] - 2026-07-26
 
 Calibration patch driven by a real two-column paper conversion where the QC

@@ -165,6 +165,7 @@ results are returned in `qc_report` (verdict, dimension scores, issues, fixes):
 | `MD-105` | Table header fused with the first data row (header cells contain standalone numbers) | critical | — |
 | `MD-106` | Empty `<span></span>` placeholder cells | info | ✅ removed |
 | `MD-107` | Flattened multi-row group headers (group labels glued onto repeated metric names in wide tables) | warn | — |
+| `MD-108` | Math-delimiter collision — escaped citation-link brackets (`[\[`…`\]](`) that MathJax/KaTeX misread as display-math openers, breaking formula rendering | warn | ✅ de-escaped (link-scoped only) |
 | `MD-201` | Body content loss — hyphenation-normalized token comparison against the PDF text layer (pymupdf, independent of the engine's layout analysis); figure text excluded | info/warn/critical by ratio | — |
 | `MD-202` | Figure-text omission — text embedded in vector figures never reaches the markdown body (expected; enable VLM enrichment to transcribe) | info | — |
 
@@ -426,6 +427,7 @@ marker 引擎首次使用时会在 **300 秒启动窗口内**下载约 2GB 模�
 | `MD-105` | 表头与首行数据融合（表头单元格含独立数字） | critical | — |
 | `MD-106` | 空 `<span></span>` 占位单元格 | info | ✅ 移除 |
 | `MD-107` | 多行分组表头被压平（宽表中分组名错接到重复的指标名上） | warn | — |
+| `MD-108` | 数学定界符冲突 —— 引用锚点链接中的转义方括号（`[\[`…`\]](`）被 MathJax/KaTeX 误读为块级数学开始符，导致公式渲染全面损坏 | warn | ✅ 去转义（仅链接形态） |
 | `MD-201` | 正文内容丢失 —— 与 PDF 文本层（pymupdf，独立于引擎版面分析的通道）做**去连字符归一化**的 token 比对，图内文字已排除 | 按比例 info/warn/critical | — |
 | `MD-202` | 图内文字省略 —— 矢量图内嵌入的文字不会进入正文（预期行为；需要时可开 VLM 增强转录） | info | — |
 
