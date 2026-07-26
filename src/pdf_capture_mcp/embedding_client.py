@@ -82,7 +82,9 @@ def setup_embedding(
         return {"ok": False, "error": "API key is required."}
 
     try:
-        vectors = _post_embeddings(api_base, api_key, model, ["dimension probe"], timeout=30)
+        vectors = _post_embeddings(
+            api_base, api_key, model, ["dimension probe"], timeout=30, provider=provider
+        )
     except Exception as exc:  # noqa: BLE001 — report validation failure verbatim
         return {"ok": False, "error": f"Validation call failed: {exc}"}
     if not vectors or not vectors[0]:
@@ -120,13 +122,44 @@ def disable_embedding() -> dict[str, Any]:
 
 
 def _post_embeddings(
-    api_base: str, api_key: str, model: str, texts: list[str], timeout: float
+    api_base: str,
+    api_key: str,
+    model: str,
+    texts: list[str],
+    timeout: float,
+    *,
+    provider: str = "openai",
+    purpose: str = "db",
 ) -> list[list[float]]:
     import httpx
 
+    headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+    url = f"{api_base.rstrip('/')}/embeddings"
+
+    if provider == "minimax":
+        # MiniMax speaks its own dialect: 'texts' + 'type' (db|query —
+        # asymmetric embeddings, which we exploit: documents are embedded
+        # as 'db', search queries as 'query'), response key 'vectors'.
+        response = httpx.post(
+            url,
+            headers=headers,
+            json={"model": model, "texts": texts, "type": purpose},
+            timeout=timeout,
+        )
+        if response.status_code != 200:
+            raise RuntimeError(f"HTTP {response.status_code}: {response.text[:300]}")
+        body = response.json()
+        base = body.get("base_resp", {})
+        if base.get("status_code", 0) != 0:
+            raise RuntimeError(f"MiniMax error {base.get('status_code')}: {base.get('status_msg')}")
+        vectors = body.get("vectors") or []
+        if len(vectors) != len(texts):
+            raise RuntimeError(f"Expected {len(texts)} vectors, got {len(vectors)}")
+        return vectors
+
     response = httpx.post(
-        f"{api_base.rstrip('/')}/embeddings",
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+        url,
+        headers=headers,
         json={"model": model, "input": texts},
         timeout=timeout,
     )
@@ -138,22 +171,43 @@ def _post_embeddings(
     return [d["embedding"] for d in data]
 
 
-def embed_texts(texts: list[str], batch_size: int = 64) -> list[list[float]]:
+def embed_texts(texts: list[str], batch_size: int = 64, purpose: str = "db") -> list[list[float]]:
     """Embed texts in batches with one retry per batch. Raises on failure —
-    a partially embedded index is worse than a clear error."""
+    a partially embedded index is worse than a clear error.
+
+    purpose: 'db' for documents being indexed, 'query' for search queries
+    (asymmetric-embedding providers like MiniMax use it; others ignore it).
+    """
     config = _load_config()
     if not is_embedding_enabled():
         raise RuntimeError("Embedding not configured. Call setup_embedding first.")
     api_key = _resolve_api_key()
+    provider = config.get("provider", "openai")
     out: list[list[float]] = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start : start + batch_size]
         try:
-            out += _post_embeddings(config["api_base"], api_key, config["model"], batch, 60)
+            out += _post_embeddings(
+                config["api_base"],
+                api_key,
+                config["model"],
+                batch,
+                60,
+                provider=provider,
+                purpose=purpose,
+            )
         except Exception:  # noqa: BLE001 — one retry for transient faults
             logger.warning("Embedding batch %d failed, retrying once", start // batch_size)
             time.sleep(2)
-            out += _post_embeddings(config["api_base"], api_key, config["model"], batch, 60)
+            out += _post_embeddings(
+                config["api_base"],
+                api_key,
+                config["model"],
+                batch,
+                60,
+                provider=provider,
+                purpose=purpose,
+            )
     return out
 
 

@@ -235,7 +235,7 @@ def search_corpus(
             )
         )
 
-    vector = embed_texts([query])[0]
+    vector = embed_texts([query], purpose="query")[0]
     hits = client.query_points(
         COLLECTION,
         query=vector,

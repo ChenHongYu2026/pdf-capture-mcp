@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.1] - 2026-07-27
+
+Field-validation patch: the v0.8.0 end-to-end test against a real provider
+surfaced a dialect gap, fixed the same day.
+
+### Fixed
+
+- MiniMax's /embeddings endpoint speaks its own dialect ('texts' + 'type'
+  request, 'vectors' response) instead of the OpenAI schema; provider=
+  'minimax' now adapts automatically. Bonus: MiniMax's asymmetric
+  embeddings are exploited properly — documents embed as type='db',
+  search queries as type='query' (better retrieval quality).
+- Field-validated end to end: 277 chunks of a real 75-page paper indexed
+  via embo-01 (1536 dims); semantic queries hit the pages previously
+  verified by the stranger-agent test.
+
 ## [0.8.0] - 2026-07-27
 
 RAG layer: the knowledge packages become a searchable corpus. Qdrant runs
