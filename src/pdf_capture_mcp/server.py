@@ -129,6 +129,7 @@ def setup_vlm(
     api_base: str = "",
     provider: str = "",
     action: str = "status",
+    policy: str = "full",
 ) -> str:
     """Configure or check VLM (Vision Language Model) for enhanced PDF extraction.
 
@@ -247,7 +248,13 @@ def setup_vlm(
                 }
             )
 
-        result = do_setup(model=model, api_key=resolved_key, api_base=api_base, provider=provider)
+        result = do_setup(
+            model=model,
+            api_key=resolved_key,
+            api_base=api_base,
+            provider=provider,
+            policy=policy,
+        )
         # SECURITY: strip api_key from response before returning to caller
         result.pop("api_key", None)
         return _json(result)
@@ -668,6 +675,23 @@ def _parse_page_range(page_range: str) -> list[int] | None:
     return sorted(set(pages))
 
 
+def _resolve_vlm_feature(value: str | bool, *, vlm_on: bool, policy_allows: bool) -> bool:
+    """Resolve a tri-state VLM feature flag ('auto' | bool-like | explicit bool).
+
+    'auto' activates the feature when a VLM is configured AND the stored
+    policy allows it — configuring a VLM is the user's opt-in. Explicit
+    booleans (or 'on'/'off' strings) always win.
+    """
+    if isinstance(value, bool):
+        return value
+    v = str(value).strip().lower()
+    if v in ("on", "true", "1", "yes"):
+        return True
+    if v in ("off", "false", "0", "no"):
+        return False
+    return vlm_on and policy_allows  # 'auto' and anything unrecognized
+
+
 def _quick_page_count(pdf: Path) -> int:
     """Fast page count via pymupdf (returns 0 if unavailable)."""
     try:
@@ -684,11 +708,11 @@ def _run_pipeline(
     *,
     engine: str,
     enable_formula: bool,
-    enable_table_enrich: bool,
-    skip_qc: bool,
-    out_dir: str,
+    enable_table_enrich: str | bool = "auto",
+    skip_qc: bool = False,
+    out_dir: str = "",
     auto_repair: bool = True,
-    enrich_figures: bool = False,
+    enrich_figures: str | bool = "auto",
     pages: list[int] | None = None,
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -701,15 +725,49 @@ def _run_pipeline(
     from pdf_capture_mcp.engines import get_engine
     from pdf_capture_mcp.extractors.tables import extract_tables
     from pdf_capture_mcp.jobs import update_stage
-    from pdf_capture_mcp.llm_client import is_vlm_enabled
+    from pdf_capture_mcp.llm_client import get_vlm_policy, is_vlm_enabled
 
     def _stage(name: str) -> None:
         if job is not None:
             update_stage(job, name)
 
-    # Pre-flight: check VLM availability if enrichment requested
+    # ── Feature resolution: 'auto' follows the configured VLM policy ──────
+    # Configuring a VLM (setup_vlm) is itself the user's opt-in to spend
+    # tokens on quality; 'auto' honors that intent, explicit bools override.
+    vlm_on = is_vlm_enabled()
+    policy = get_vlm_policy() if vlm_on else ""
+    table_enrich_on = _resolve_vlm_feature(
+        enable_table_enrich, vlm_on=vlm_on, policy_allows=policy in ("full", "tables_only")
+    )
+    figures_on = _resolve_vlm_feature(enrich_figures, vlm_on=vlm_on, policy_allows=policy == "full")
+    features: dict[str, Any] = {
+        "deterministic_fixes": {"enabled": not skip_qc, "cost": "free, always on with QC"},
+        "geometric_repair": {"enabled": auto_repair and not skip_qc, "cost": "free"},
+        "vlm_table_repair": {
+            "enabled": table_enrich_on,
+            "reason": (
+                "active (VLM configured, policy allows)"
+                if table_enrich_on
+                else "VLM not configured — run setup_vlm to unlock"
+                if not vlm_on
+                else "disabled by parameter"
+            ),
+        },
+        "vlm_figure_descriptions": {
+            "enabled": figures_on,
+            "reason": (
+                "active (VLM configured, policy=full)"
+                if figures_on
+                else "VLM not configured — run setup_vlm to unlock"
+                if not vlm_on
+                else f"off (policy={policy or 'n/a'}); pass enrich_figures=True to force"
+            ),
+        },
+    }
+
+    # Pre-flight notice only when the caller EXPLICITLY asked and VLM is off
     vlm_notice = ""
-    if enable_table_enrich and not is_vlm_enabled():
+    if enable_table_enrich is True and not vlm_on:
         vlm_notice = (
             "VLM table enrichment requested but VLM is not configured. "
             "Call 'setup_vlm' with action='enable' to configure a vision-capable model. "
@@ -815,7 +873,7 @@ def _run_pipeline(
         from pdf_capture_mcp.llm_client import is_vlm_enabled
 
         table_defects = [i for i in audit_issues if i.rule in ("MD-104", "MD-105", "MD-107")]
-        want_vlm = (enable_table_enrich and table_defects) or enrich_figures
+        want_vlm = (table_enrich_on and table_defects) or figures_on
         if want_vlm and is_vlm_enabled():
             from pdf_capture_mcp.quality.vlm_repair import run_vlm_arbitration
 
@@ -825,8 +883,8 @@ def _run_pipeline(
                 pdf,
                 table_defects,
                 base_dir=extraction_dir,
-                repair_tables=bool(enable_table_enrich),
-                describe_figures=bool(enrich_figures),
+                repair_tables=table_enrich_on,
+                describe_figures=figures_on,
             )
             repair_actions += [vars(a) for a in vlm["actions"]]
             if vlm["modified"]:
@@ -836,7 +894,7 @@ def _run_pipeline(
                 )
                 audit_issues = post["issues"]
                 audit_counts = post["counts"]
-        elif enable_table_enrich and table_defects and not is_vlm_enabled():
+        elif table_enrich_on and table_defects and not is_vlm_enabled():
             vlm_notice = (
                 "Table defects detected and enable_table_enrich requested, but VLM "
                 "is not configured — call setup_vlm to enable vision-based repair."
@@ -891,6 +949,7 @@ def _run_pipeline(
         "qc_report": qc_report,
         "elapsed_seconds": extract_report.elapsed_seconds,
         "vlm_notice": vlm_notice,
+        "features": features,
     }
 
 
@@ -899,14 +958,14 @@ def pdf_to_markdown(
     pdf_path: str,
     engine: str = "auto",
     enable_formula: bool = True,
-    enable_table_enrich: bool = False,
+    enable_table_enrich: str = "auto",
     enable_tatr: bool = False,
     skip_qc: bool = False,
     out_dir: str = "",
     mode: str = "auto",
     page_range: str = "",
     auto_repair: bool = True,
-    enrich_figures: bool = False,
+    enrich_figures: str = "auto",
 ) -> str:
     """Convert a PDF document to high-quality structured Markdown.
 
@@ -919,16 +978,22 @@ def pdf_to_markdown(
     with get_job_status(job_id). The result markdown is always written to
     <out_dir>/extraction/full_text.md.
 
+    VLM feature flags are tri-state: 'auto' (default) activates the feature
+    when a VLM is configured (setup_vlm) and its stored policy allows it —
+    configuring a VLM is the user's opt-in to spend tokens on quality.
+    Pass 'on'/'off' to override per call. The response's `features` section
+    reports exactly what ran and how to unlock what didn't.
+
     Args:
         pdf_path: Absolute path to the PDF file.
-        engine: Extraction engine ('marker', 'mineru', 'auto').
+        engine: Extraction engine ('auto', 'marker', 'mineru').
         enable_formula: Enable formula/equation recognition.
-        enable_table_enrich: Escalate broken tables (torn cells, fused or
-            flattened group headers) to the configured VLM: the table region
-            is re-read from a hi-res page render and replaced with an HTML
-            <table> — only when a numeric-conservation gate passes (no
-            invented numbers, no lost numbers). Requires setup_vlm;
-            consumes API tokens.
+        enable_table_enrich: 'auto' | 'on' | 'off'. Escalate broken tables
+            (torn cells, fused/flattened group headers) to the configured
+            VLM: the table region is re-read from a hi-res page render and
+            replaced with an HTML <table> — only when the numeric-
+            conservation gate passes (no invented numbers, no lost numbers).
+            'auto' = on whenever a VLM is configured.
         enable_tatr: Enable TATR deep-learning table structure detection (requires torch).
         skip_qc: Skip quality gate (debug only).
         out_dir: Output directory (auto-created if empty).
@@ -941,13 +1006,15 @@ def pdf_to_markdown(
             text layer. Repairs are applied only when a verification gate
             passes; otherwise the defect is reported with candidates
             (repair-or-report). Set False to keep the raw engine output.
-        enrich_figures: Inject a short VLM-generated description under each
-            extracted figure image so figure-embedded content becomes
-            retrievable by text-only RAG (closes the MD-202 gap). Requires
-            setup_vlm; consumes API tokens per figure.
+        enrich_figures: 'auto' | 'on' | 'off'. Inject a short VLM-generated
+            description under each extracted figure image so figure-embedded
+            content becomes retrievable by text-only RAG (closes the MD-202
+            gap). 'auto' = on when a VLM is configured with policy='full'.
+            Consumes API tokens per figure.
 
     Returns:
         JSON with markdown_text (sync) or job_id + polling hint (async).
+        Always includes `features` describing which deep capabilities ran.
     """
     try:
         pdf = _resolve_pdf(pdf_path)

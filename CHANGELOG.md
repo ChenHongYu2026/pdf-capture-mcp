@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0] - 2026-07-26
+
+Feature-activation redesign: deep capabilities no longer sleep silently.
+Users who configured a VLM often didn't know they still had to pass extra
+flags per call — the quality tier they paid to unlock never ran.
+
+### Changed
+
+- `pdf_to_markdown` VLM flags are now tri-state strings defaulting to
+  `'auto'`: `enable_table_enrich` and `enrich_figures` activate
+  automatically when a VLM is configured and its stored policy allows.
+  Configuring a VLM (setup_vlm) is itself the opt-in to spend tokens on
+  quality. Explicit `'on'`/`'off'` (or booleans) always override.
+- Zero-cost tiers (sanitize, audit, geometric repair) remain always-on.
+
+### Added
+
+- `setup_vlm` gains `policy: 'full' | 'tables_only'` (default `'full'`),
+  persisted with the VLM config; `'full'` also enables figure descriptions
+  under `'auto'`. Legacy configs default to `'full'`.
+- Response `features` section: per-capability enabled/disabled state with
+  the reason and how to unlock — no more guessing what actually ran.
+
 ## [0.5.0] - 2026-07-26
 
 VLM arbitration: the escalation tier for defects beyond geometric reach.

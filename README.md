@@ -191,15 +191,23 @@ Each repair must pass a machine-checkable verification gate:
 Gate passed → patched and re-audited (issue disappears). Gate failed → the
 defect stays reported in `qc_report.repairs` with recovered candidates.
 
-**VLM arbitration (opt-in)**: defects beyond geometric reach — merged
+**VLM arbitration (auto-activated)**: defects beyond geometric reach — merged
 cells, multi-row group headers — escalate to the configured vision model
 (`setup_vlm`). The broken table's source region is re-read from a hi-res
 page render and replaced with an HTML `<table>` (Markdown tables cannot
 express rowspan/colspan). NUMERIC GATE: the VLM may neither invent numbers
 absent from the region's text layer nor drop numbers from the broken block.
-Enable with `enable_table_enrich=True`. `enrich_figures=True` additionally
-injects VLM descriptions under figure images so figure-embedded content
-(MD-202) becomes retrievable by text-only RAG. Both consume API tokens.
+
+Activation follows a tri-state model — **configuring a VLM is itself the
+opt-in**: `enable_table_enrich` and `enrich_figures` default to `'auto'`,
+which activates them whenever a VLM is configured and its stored policy
+allows (`setup_vlm policy='full'` — the default — enables both; use
+`'tables_only'` to keep figure descriptions off). Explicit `'on'`/`'off'`
+per call always overrides. Every response carries a `features` section
+reporting exactly which capabilities ran and how to unlock the rest.
+`enrich_figures` injects VLM descriptions under figure images so
+figure-embedded content (MD-202) becomes retrievable by text-only RAG.
+VLM calls consume API tokens.
 
 Remaining escalation path:
 
@@ -459,12 +467,17 @@ marker 引擎首次使用时会在 **300 秒启动窗口内**下载约 2GB 模�
 门槛通过 → 打补丁并重新审计（问题从清单消失）；门槛失败 → 缺陷保留在
 `qc_report.repairs` 中并附恢复候选值。
 
-**VLM 仲裁（可选）**：几何修复触及不到的缺陷 —— 合并单元格、多行分组表头 ——
+**VLM 仲裁（自动激活）**：几何修复触及不到的缺陷 —— 合并单元格、多行分组表头 ——
 升级到已配置的视觉模型（`setup_vlm`）：损坏表格的源区域以高清渲染重读，
 替换为 HTML `<table>`（Markdown 表格无法表达 rowspan/colspan）。数值守恒门槛：
 VLM 不得发明区域文本层没有的数字，也不得丢失损坏块里的数字。
-`enable_table_enrich=True` 开启；`enrich_figures=True` 额外在图片下注入 VLM
-描述，让图内信息（MD-202 缺口）可被纯文本 RAG 检索。两者均消耗 API token。
+
+激活遵循三态模型 —— **配置 VLM 本身就是授权**：`enable_table_enrich` 与
+`enrich_figures` 默认 `'auto'`，VLM 已配置且其存储的 policy 允许时自动启用
+（`setup_vlm policy='full'` 为默认，两者全开；`'tables_only'` 仅开表格修复）。
+每次调用可用 `'on'`/`'off'` 显式覆盖。响应中的 `features` 段逐项报告哪些
+能力实际运行、未运行的原因及解锁方式。`enrich_figures` 在图片下注入 VLM
+描述，让图内信息（MD-202 缺口）可被纯文本 RAG 检索。VLM 调用消耗 API token。
 
 后续升级路径：
 

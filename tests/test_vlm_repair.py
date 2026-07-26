@@ -176,3 +176,42 @@ def test_figure_description_injected(tmp_path, table_pdf, monkeypatch):
         describe_figures=True,
     )
     assert again["modified"] is False
+
+
+# ── v0.6.0: tri-state feature resolution & VLM policy ───────────────────
+
+
+def test_tristate_explicit_bool_wins():
+    from pdf_capture_mcp.server import _resolve_vlm_feature
+
+    assert _resolve_vlm_feature(True, vlm_on=False, policy_allows=False) is True
+    assert _resolve_vlm_feature(False, vlm_on=True, policy_allows=True) is False
+
+
+def test_tristate_string_overrides():
+    from pdf_capture_mcp.server import _resolve_vlm_feature
+
+    assert _resolve_vlm_feature("on", vlm_on=False, policy_allows=False) is True
+    assert _resolve_vlm_feature("off", vlm_on=True, policy_allows=True) is False
+    assert _resolve_vlm_feature("TRUE", vlm_on=False, policy_allows=False) is True
+
+
+def test_tristate_auto_follows_vlm_and_policy():
+    from pdf_capture_mcp.server import _resolve_vlm_feature
+
+    assert _resolve_vlm_feature("auto", vlm_on=True, policy_allows=True) is True
+    assert _resolve_vlm_feature("auto", vlm_on=True, policy_allows=False) is False
+    assert _resolve_vlm_feature("auto", vlm_on=False, policy_allows=True) is False
+
+
+def test_vlm_policy_defaults_to_full_for_legacy_config(monkeypatch):
+    import pdf_capture_mcp.llm_client as llm
+
+    # Legacy config saved before the policy field existed.
+    monkeypatch.setattr(llm, "_load_config", lambda: {"enabled": True, "model": "m"})
+    assert llm.get_vlm_policy() == "full"
+    # Corrupted value falls back safely.
+    monkeypatch.setattr(llm, "_load_config", lambda: {"policy": "banana"})
+    assert llm.get_vlm_policy() == "full"
+    monkeypatch.setattr(llm, "_load_config", lambda: {"policy": "tables_only"})
+    assert llm.get_vlm_policy() == "tables_only"

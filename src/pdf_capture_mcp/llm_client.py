@@ -82,6 +82,16 @@ def is_vlm_enabled() -> bool:
     return config.get("enabled", False) and bool(_resolve_api_key())
 
 
+def get_vlm_policy() -> str:
+    """Return the configured VLM usage policy ('full' or 'tables_only').
+
+    Configs created before the policy field existed default to 'full' —
+    a user who configured a VLM expressed the intent to use it.
+    """
+    policy = str(_load_config().get("policy", "full"))
+    return policy if policy in ("full", "tables_only") else "full"
+
+
 # ── Setup & validation ──────────────────────────────────────────────────────
 
 
@@ -90,6 +100,7 @@ def setup_vlm(
     api_key: str,
     api_base: str = "https://api.openai.com/v1",
     provider: str = "openai",
+    policy: str = "full",
 ) -> dict[str, Any]:
     """Configure and validate VLM access.
 
@@ -103,6 +114,10 @@ def setup_vlm(
         api_key: API key for the provider.
         api_base: API base URL (OpenAI-compatible endpoint).
         provider: Provider name for display purposes.
+        policy: What the pipeline may use the VLM for by default when
+            callers pass 'auto': 'full' (table repair + figure descriptions)
+            or 'tables_only' (table repair only). Explicit True/False
+            arguments always override the policy.
 
     Returns:
         Dict with ok, message, and validation details.
@@ -111,13 +126,15 @@ def setup_vlm(
         return {"ok": False, "error": "Model name is required."}
     if not api_key.strip():
         return {"ok": False, "error": "API key is required."}
+    if policy not in ("full", "tables_only"):
+        return {"ok": False, "error": f"Invalid policy: {policy!r}. Use: full, tables_only"}
 
     # Step 1: Test API connectivity and model access
     try:
         import httpx
     except ImportError:
         # Fallback: use urllib
-        return _setup_vlm_urllib(model, api_key, api_base, provider)
+        return _setup_vlm_urllib(model, api_key, api_base, provider, policy)
 
     try:
         client = httpx.Client(timeout=30.0)
@@ -195,20 +212,31 @@ def setup_vlm(
             "model": model,
             "api_key": api_key,
             "api_base": api_base,
+            "policy": policy,
             "validated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
         _save_config(config)
 
+        policy_msg = (
+            "Full VLM capability is now ACTIVE BY DEFAULT: broken tables are "
+            "repaired from page renders and figure descriptions are injected "
+            "for RAG. Pass policy='tables_only' to limit this, or override "
+            "per call via enable_table_enrich / enrich_figures."
+            if policy == "full"
+            else "Policy 'tables_only': broken tables are repaired by default; "
+            "figure descriptions stay off unless enrich_figures=True."
+        )
         return {
             "ok": True,
             "message": (
                 f"VLM configured successfully: {provider}/{model}. "
-                "Vision capability confirmed. "
-                "Note: VLM calls consume tokens — each table/formula extraction "
-                "uses approximately 500-2000 tokens depending on image complexity."
+                f"Vision capability confirmed. {policy_msg} "
+                "Note: VLM calls consume tokens — each table/figure uses "
+                "approximately 500-2000 tokens depending on image complexity."
             ),
             "model": model,
             "provider": provider,
+            "policy": policy,
             "test_reply": reply[:50],
         }
 
@@ -218,7 +246,9 @@ def setup_vlm(
         return {"ok": False, "error": f"Validation failed: {type(exc).__name__}: {exc}"}
 
 
-def _setup_vlm_urllib(model: str, api_key: str, api_base: str, provider: str) -> dict[str, Any]:
+def _setup_vlm_urllib(
+    model: str, api_key: str, api_base: str, provider: str, policy: str = "full"
+) -> dict[str, Any]:
     """Fallback VLM setup using urllib (no httpx dependency)."""
     import urllib.request
 
@@ -260,6 +290,7 @@ def _setup_vlm_urllib(model: str, api_key: str, api_base: str, provider: str) ->
                 "model": model,
                 "api_key": api_key,
                 "api_base": api_base,
+                "policy": policy,
                 "validated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
             }
             _save_config(config)
