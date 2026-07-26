@@ -688,6 +688,7 @@ def _run_pipeline(
     skip_qc: bool,
     out_dir: str,
     auto_repair: bool = True,
+    enrich_figures: bool = False,
     pages: list[int] | None = None,
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -808,6 +809,39 @@ def _run_pipeline(
                 audit_issues = post["issues"]
                 audit_counts = post["counts"]
 
+        # Phase 3.6: VLM arbitration — table defects beyond geometric reach
+        # (merged cells, group headers) plus optional figure descriptions for
+        # text-only RAG. Opt-in: consumes API tokens.
+        from pdf_capture_mcp.llm_client import is_vlm_enabled
+
+        table_defects = [i for i in audit_issues if i.rule in ("MD-104", "MD-105", "MD-107")]
+        want_vlm = (enable_table_enrich and table_defects) or enrich_figures
+        if want_vlm and is_vlm_enabled():
+            from pdf_capture_mcp.quality.vlm_repair import run_vlm_arbitration
+
+            _stage("vlm_arbitration")
+            vlm = run_vlm_arbitration(
+                markdown_text,
+                pdf,
+                table_defects,
+                base_dir=extraction_dir,
+                repair_tables=bool(enable_table_enrich),
+                describe_figures=bool(enrich_figures),
+            )
+            repair_actions += [vars(a) for a in vlm["actions"]]
+            if vlm["modified"]:
+                markdown_text = vlm["text"]
+                post = run_markdown_audit(
+                    markdown_text, pdf_path=pdf, autofix=False, base_dir=extraction_dir
+                )
+                audit_issues = post["issues"]
+                audit_counts = post["counts"]
+        elif enable_table_enrich and table_defects and not is_vlm_enabled():
+            vlm_notice = (
+                "Table defects detected and enable_table_enrich requested, but VLM "
+                "is not configured — call setup_vlm to enable vision-based repair."
+            )
+
         if markdown_text != audit["text"] or audit["modified"]:
             # Persist sanitized/repaired markdown
             md_path.write_text(markdown_text, encoding="utf-8")
@@ -872,6 +906,7 @@ def pdf_to_markdown(
     mode: str = "auto",
     page_range: str = "",
     auto_repair: bool = True,
+    enrich_figures: bool = False,
 ) -> str:
     """Convert a PDF document to high-quality structured Markdown.
 
@@ -888,7 +923,12 @@ def pdf_to_markdown(
         pdf_path: Absolute path to the PDF file.
         engine: Extraction engine ('marker', 'mineru', 'auto').
         enable_formula: Enable formula/equation recognition.
-        enable_table_enrich: Enable VLM-based table enrichment (configure via setup_vlm).
+        enable_table_enrich: Escalate broken tables (torn cells, fused or
+            flattened group headers) to the configured VLM: the table region
+            is re-read from a hi-res page render and replaced with an HTML
+            <table> — only when a numeric-conservation gate passes (no
+            invented numbers, no lost numbers). Requires setup_vlm;
+            consumes API tokens.
         enable_tatr: Enable TATR deep-learning table structure detection (requires torch).
         skip_qc: Skip quality gate (debug only).
         out_dir: Output directory (auto-created if empty).
@@ -901,6 +941,10 @@ def pdf_to_markdown(
             text layer. Repairs are applied only when a verification gate
             passes; otherwise the defect is reported with candidates
             (repair-or-report). Set False to keep the raw engine output.
+        enrich_figures: Inject a short VLM-generated description under each
+            extracted figure image so figure-embedded content becomes
+            retrievable by text-only RAG (closes the MD-202 gap). Requires
+            setup_vlm; consumes API tokens per figure.
 
     Returns:
         JSON with markdown_text (sync) or job_id + polling hint (async).
@@ -931,6 +975,7 @@ def pdf_to_markdown(
             "skip_qc": skip_qc,
             "out_dir": out_dir,
             "auto_repair": auto_repair,
+            "enrich_figures": enrich_figures,
             "pages": pages,
         }
 
