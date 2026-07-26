@@ -68,6 +68,9 @@ class AuditIssue:
     message: str
     lines: list[int] = field(default_factory=list)
     suggestion: str = ""
+    # Structured detector evidence (e.g. MD-110 geometric gate verdict);
+    # consumed by repairers, serialized into qc_report.
+    evidence: dict[str, Any] | None = None
 
 
 # ── Shared table helpers ────────────────────────────────────────────────────

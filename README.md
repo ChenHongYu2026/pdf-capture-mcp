@@ -95,7 +95,8 @@ complex layouts, the agent can install marker on demand (or you can pre-install 
 
 | Tool | Description |
 |------|-------------|
-| `pdf_to_markdown` | Full pipeline: extract → clean → QC → structured Markdown (async for large PDFs) |
+| `pdf_to_markdown` | Full pipeline: extract → clean → QC → repair → self-describing knowledge package (async for large PDFs) |
+| `export_to_obsidian` | Copy a knowledge package into an Obsidian vault as a whole unit (idempotent) |
 | `get_job_status` | Poll background jobs (large conversions / model downloads) |
 | `download_models` | Pre-download marker models (recommended on slow networks) |
 | `extract_tables` | Table extraction (pdfplumber rules + optional TATR deep learning) |
@@ -104,6 +105,42 @@ complex layouts, the agent can install marker on demand (or you can pre-install 
 | `setup_vlm` | Configure optional VLM enhancement (any vision-capable provider) |
 | `check_environment` | Verify engines, dependencies, model cache, and network config |
 | `install_engine` | Install marker/ml engines on behalf of the user |
+
+## Knowledge Packages (v0.7.0)
+
+Every conversion now produces a **self-describing knowledge package** — a
+folder any LLM agent can understand from one README read, and that drops
+into an Obsidian vault as a unit:
+
+```
+<out_dir>/<slug>/
+├── <slug>.md        main document — same name as folder ([[slug]] works),
+│                    YAML frontmatter included (title/doc_id/pages/qc_verdict)
+├── README.md        entry map: summary, file table, chunks schema
+├── images/          extracted figures (relative refs — render everywhere)
+├── tables/          p<page>_table_<n>.csv — independent extraction channel
+└── data/
+    ├── chunks.jsonl    semantic chunks: heading_path, page, chunk_type,
+    │                   content (hashed for chunk_id) + embed_text (context)
+    ├── metadata.json   doc-level metadata, manifest, content_hash
+    └── qc_report.json  archived audit & repair record
+```
+
+Key properties (from two design-audit rounds):
+
+- **Content-addressed identity**: `doc_id = sha256(pdf)[:16]`; re-converting
+  the same PDF overwrites its package (idempotent), regardless of filename.
+- **Chunk ids are content-addressed** too — editing one section re-embeds
+  only that section when you rebuild a vector index later.
+- **Hierarchical chunking**: heading-path metadata, tables/code as dedicated
+  chunks (oversized tables split with the header repeated per part), figures
+  chunked only when they carry a VLM description, page numbers anchored via
+  a monotonic scan of the PDF text layer (scanned PDFs honestly report null).
+- **MD-110 cross-page table merge**: adjacent same-column tables merge ONLY
+  when PDF geometry proves a page break (bottom-edge + top-edge + no caption
+  between) — same-looking but separate tables are never merged.
+- Default output root: `$PDF_CAPTURE_OUTPUT_ROOT` or `~/Documents/pdf-capture`.
+  Pass `package=False` for the bare markdown layout of earlier versions.
 
 ## Large PDFs & Timeouts
 
@@ -391,7 +428,8 @@ Qoder / Claude Desktop / Cursor 用户，在 `mcp.json` 中添加：
 
 | 工具 | 说明 |
 |------|------|
-| `pdf_to_markdown` | 完整管线：提取 → 清洁 → QC → 结构化 Markdown（大文件自动异步） |
+| `pdf_to_markdown` | 完整管线：提取 → 清洁 → QC → 修复 → 自描述知识包（大文件自动异步） |
+| `export_to_obsidian` | 将知识包作为整体拷入 Obsidian vault（幂等） |
 | `get_job_status` | 轮询后台任务（大文件转换 / 模型下载） |
 | `download_models` | 预下载 marker 模型（慢速网络强烈推荐） |
 | `extract_tables` | 表格提取（pdfplumber 规则 + 可选 TATR 深度学习） |
@@ -400,6 +438,26 @@ Qoder / Claude Desktop / Cursor 用户，在 `mcp.json` 中添加：
 | `setup_vlm` | 配置可选的 VLM 增强（支持任何具备视觉能力的供应商） |
 | `check_environment` | 校验引擎、依赖、模型缓存与网络配置 |
 | `install_engine` | 代用户安装 marker/ml 引擎 |
+
+## 知识包（v0.7.0）
+
+每次转换现在产出**自描述知识包**——任何 LLM Agent 读一遍 README 即可完全理解，
+整个文件夹可直接拖入 Obsidian vault：
+
+```
+<out_dir>/<slug>/
+├── <slug>.md        主文档，与目录同名（[[slug]] 直达），出厂内置 frontmatter
+├── README.md        入口地图：摘要、文件表、分块 schema
+├── images/          提取图片（相对引用）
+├── tables/          p<页码>_table_<n>.csv —— 独立提取通道，可交叉验证
+└── data/            chunks.jsonl + metadata.json + qc_report.json
+```
+
+关键设计（来自两轮设计审计）：内容寻址身份（doc_id/chunk_id 均为内容哈希，
+重转幂等覆盖、增量重嵌只触及变更块）；层级分块（标题路径元数据、表格/代码
+独立成块、大表分片重复表头、页码单调锚定）；MD-110 跨页表合并（PDF 几何
+三证门槛，同列数独立表绝不误合）。默认输出根目录 `$PDF_CAPTURE_OUTPUT_ROOT`
+或 `~/Documents/pdf-capture`；`package=False` 可回退旧布局。
 
 ## 大文件与超时
 

@@ -35,10 +35,11 @@ class TestServerInit:
             assert "install_engine" in names
             assert "download_models" in names
             assert "get_job_status" in names
+            assert "export_to_obsidian" in names
             return len(tools)
 
         count = asyncio.run(_check())
-        assert count == 9
+        assert count == 10
 
 
 class TestPdfInfo:
