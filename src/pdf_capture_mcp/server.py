@@ -769,15 +769,43 @@ def _run_pipeline(
     table_result = extract_tables(pdf, max_tables=30)
     table_count = table_result.get("stats", {}).get("total_tables", 0)
 
-    # Phase 4: QC (simplified)
+    # Phase 3: Content-aware audit (auto-fix safe defects, detect the rest)
+    # + Phase 4: multi-dimensional QC gate
     _stage("qc")
     qc_verdict = "PASS"
+    qc_report: dict[str, Any] = {}
     if not skip_qc and markdown_text:
-        char_count = len(markdown_text.strip())
-        if char_count < 100:
+        from pdf_capture_mcp.quality.md_audit import run_markdown_audit
+        from pdf_capture_mcp.quality.qc_gate import run_qc_gate
+
+        audit = run_markdown_audit(markdown_text, pdf_path=pdf, autofix=True)
+        if audit["modified"]:
+            # Persist sanitized markdown (control chars / placeholder cleanup)
+            markdown_text = audit["text"]
+            md_path.write_text(markdown_text, encoding="utf-8")
+
+        gate = run_qc_gate(
+            markdown_text,
+            page_count=extract_report.page_count,
+            expected_tables=table_count,
+        )
+        qc_verdict = gate.verdict
+        # Content-aware critical findings escalate a PASS to WARN: the text
+        # may look statistically fine while specific tables/values are broken.
+        if qc_verdict == "PASS" and audit["counts"]["critical"] > 0:
             qc_verdict = "WARN"
-        elif char_count == 0:
-            qc_verdict = "HALT"
+
+        qc_report = {
+            "verdict": qc_verdict,
+            "dimensions": gate.dimensions,
+            "audit_counts": audit["counts"],
+            # Plain dicts so both MCP JSON responses and persisted job state
+            # serialize cleanly.
+            "audit_fixes": [vars(f) for f in audit["fixes"]],
+            "audit_issues": [vars(i) for i in audit["issues"]],
+        }
+    elif not markdown_text:
+        qc_verdict = "HALT"
 
     return {
         "ok": qc_verdict != "HALT",
@@ -797,6 +825,7 @@ def _run_pipeline(
         "table_count": table_count,
         "image_count": extract_report.image_count,
         "qc_verdict": qc_verdict,
+        "qc_report": qc_report,
         "elapsed_seconds": extract_report.elapsed_seconds,
         "vlm_notice": vlm_notice,
     }

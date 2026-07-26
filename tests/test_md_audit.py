@@ -1,0 +1,191 @@
+"""Tests for the content-aware markdown audit (quality/md_audit.py).
+
+Fixtures reproduce the defect patterns found in a real 75-page paper
+conversion audit: control chars at in-cell word wraps, torn scientific
+notation, header/data fusion, empty header rows, span placeholders.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from pdf_capture_mcp.quality.md_audit import (
+    audit_markdown,
+    check_content_coverage,
+    run_markdown_audit,
+    sanitize_markdown,
+)
+
+# ── MD-102: control characters (auto-fix) ───────────────────────────────────
+
+
+def test_control_chars_removed_and_words_rejoined():
+    text = "| Buddhism | 'En\x02lightenment', |\n|---|---|\n| a | b |"
+    fixed, fixes = sanitize_markdown(text)
+    assert "\x02" not in fixed
+    assert "Enlightenment" in fixed  # word fragments rejoined
+    assert any(f.rule == "MD-102" for f in fixes)
+    assert fixes[0].severity == "critical"
+
+
+def test_tab_and_newlines_survive_sanitize():
+    text = "line1\nline2\twith tab\n"
+    fixed, fixes = sanitize_markdown(text)
+    assert fixed == text
+    assert fixes == []
+
+
+# ── MD-106: span placeholders (auto-fix) ────────────────────────────────────
+
+
+def test_span_placeholders_removed():
+    text = "| <span></span> | <span></span> |\n|---|---|\n| A | B |"
+    fixed, fixes = sanitize_markdown(text)
+    assert "<span></span>" not in fixed
+    assert any(f.rule == "MD-106" for f in fixes)
+
+
+# ── MD-101: garbled characters (detect only) ────────────────────────────────
+
+
+def test_replacement_char_detected():
+    issues = audit_markdown("normal text\nbroken \ufffd here\n")
+    assert any(i.rule == "MD-101" and i.severity == "critical" for i in issues)
+
+
+def test_private_use_area_detected():
+    issues = audit_markdown("glyph \ue123 leaked\n")
+    assert any(i.rule == "MD-101" for i in issues)
+
+
+# ── MD-103: empty header row ────────────────────────────────────────────────
+
+
+def test_empty_header_detected():
+    text = "|  |  |  |\n|---|---|---|\n| Alice | Bob | Carol |"
+    issues = audit_markdown(text)
+    assert any(i.rule == "MD-103" and i.severity == "warn" for i in issues)
+
+
+def test_normal_header_not_flagged():
+    text = "| Name | Score |\n|---|---|\n| A | 1 |"
+    issues = audit_markdown(text)
+    assert not any(i.rule == "MD-103" for i in issues)
+
+
+# ── MD-104: numeric column tearing ──────────────────────────────────────────
+
+TORN_TABLE = """\
+| Model | Batch Size | | | Learning | Rate |
+|-------|-----------|---|---|----------|------|
+| Small | 0.5M | 6 | 0 | × 10 | − 4 |
+| Medium | 0.5M | 3 | 0 | × 10 | − 4 |
+| Large | 0.5M | 2 | 5 | × 10 | − 4 |
+"""
+
+
+def test_torn_scientific_notation_detected():
+    issues = audit_markdown(TORN_TABLE)
+    hits = [i for i in issues if i.rule == "MD-104"]
+    assert len(hits) == 1
+    assert hits[0].severity == "critical"
+    assert len(hits[0].lines) == 3  # all three torn rows located
+
+
+def test_intact_scientific_notation_not_flagged():
+    text = "| Model | Learning Rate |\n|---|---|\n| Small | 6.0 × 10−4 |\n| Medium | 3.0 × 10−4 |"
+    issues = audit_markdown(text)
+    assert not any(i.rule == "MD-104" for i in issues)
+
+
+# ── MD-105: header fused with data row ──────────────────────────────────────
+
+
+def test_header_fusion_detected():
+    text = (
+        "| Dataset Common Crawl | (filtered) 410 | Quantity billion | mix 60% | tokens 0.44 |\n"
+        "|---|---|---|---|---|\n"
+        "| WebText2 | 19 | billion | 22% | 2.9 |"
+    )
+    issues = audit_markdown(text)
+    hits = [i for i in issues if i.rule == "MD-105"]
+    assert len(hits) == 1
+    assert hits[0].severity == "critical"
+
+
+def test_headers_with_attached_digits_not_flagged():
+    # 'F1', 'RACE-h', 'SQuADv2' — digits glued to letters are legitimate.
+    text = "| CoQA F1 | RACE-h | SQuADv2 |\n|---|---|---|\n| 85.0 | 46.8 | 69.8 |"
+    issues = audit_markdown(text)
+    assert not any(i.rule == "MD-105" for i in issues)
+
+
+# ── MD-201: content coverage ────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def tiny_pdf(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    pdf = tmp_path / "t.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    # Multiple short lines: insert_text does not wrap, and the coverage
+    # check skips PDFs whose text layer is under 200 chars (scanned guard).
+    lines = [
+        "Quantum entanglement researchers Brown and Kaplan published results",
+        "The experiment measured decoherence rates across arrays.",
+        "Superconducting qubit devices were calibrated repeatedly.",
+        "Measurement fidelity exceeded baseline expectations everywhere.",
+        "Additional trials confirmed reproducibility of the findings.",
+    ]
+    for n, ln in enumerate(lines):
+        page.insert_text((72, 72 + n * 18), ln)
+    doc.save(str(pdf))
+    doc.close()
+    return pdf
+
+
+def test_coverage_reports_missing_tokens(tiny_pdf):
+    md_missing_authors = (
+        "Quantum entanglement researchers published results. "
+        "The experiment measured decoherence rates across arrays. "
+        "Superconducting qubit devices were calibrated repeatedly. "
+        "Measurement fidelity exceeded baseline expectations everywhere. "
+        "Additional trials confirmed reproducibility of the findings."
+    )
+    issue = check_content_coverage(tiny_pdf, md_missing_authors)
+    assert issue is not None
+    assert issue.rule == "MD-201"
+    assert "brown" in issue.suggestion.lower()
+    assert "kaplan" in issue.suggestion.lower()
+
+
+def test_coverage_silent_when_complete(tiny_pdf):
+    md_full = (
+        "Quantum entanglement researchers Brown and Kaplan published results. "
+        "The experiment measured decoherence rates across arrays. "
+        "Superconducting qubit devices were calibrated repeatedly. "
+        "Measurement fidelity exceeded baseline expectations everywhere. "
+        "Additional trials confirmed reproducibility of the findings."
+    )
+    assert check_content_coverage(tiny_pdf, md_full) is None
+
+
+# ── Orchestrator ────────────────────────────────────────────────────────────
+
+
+def test_run_markdown_audit_end_to_end():
+    dirty = "text \x02 here\n" + TORN_TABLE
+    result = run_markdown_audit(dirty, pdf_path=None, autofix=True)
+    assert result["modified"] is True
+    assert "\x02" not in result["text"]
+    assert any(f.rule == "MD-102" for f in result["fixes"])
+    assert any(i.rule == "MD-104" for i in result["issues"])
+    assert result["counts"]["critical"] >= 1
+
+
+def test_run_markdown_audit_no_autofix():
+    dirty = "text \x02 here"
+    result = run_markdown_audit(dirty, autofix=False)
+    assert result["modified"] is False
+    assert "\x02" in result["text"]

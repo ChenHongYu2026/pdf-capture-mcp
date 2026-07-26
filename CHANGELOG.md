@@ -5,6 +5,39 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-07-26
+
+Driven by a manual quality audit of a real 75-page paper conversion: every
+actual defect (control chars, torn numeric columns, fused table headers,
+author-block content loss) passed the existing statistical QC unnoticed.
+
+### Added
+
+- New module `src/pdf_capture_mcp/quality/md_audit.py` — content-aware audit:
+  - `MD-101` garbled chars (U+FFFD / private-use area) — detect
+  - `MD-102` C0 control chars at in-cell word wraps — detect + auto-fix
+    (chars removed, word fragments rejoined)
+  - `MD-103` all-empty table header rows — detect
+  - `MD-104` numeric column tearing (scientific notation split across cells,
+    decimal point lost) — detect with per-row line numbers
+  - `MD-105` table header fused with first data row — detect
+  - `MD-106` empty `<span></span>` placeholder cells — detect + auto-fix
+  - `MD-201` content-loss coverage: token-multiset comparison against the
+    PDF text layer (pymupdf), reporting missing-token examples
+- `pdf_to_markdown` response gains `qc_report` (verdict, dimension scores,
+  `audit_issues`, `audit_fixes`, counts); sanitized markdown is written back
+  to `full_text.md`.
+- Any `critical` audit finding escalates a `PASS` verdict to `WARN`.
+- README (EN/中文): new "Quality Audit Rules" section with the full rule
+  catalog, auto-fix policy, and remediation guidance.
+
+### Fixed
+
+- Wired the existing multi-dimensional `qc_gate` (text completeness, heading
+  structure, formula integrity, table coverage) into the conversion pipeline
+  — it was previously implemented but never invoked; the pipeline only ran a
+  character-count check.
+
 ## [0.2.0] - 2026-07-26
 
 Driven by real-world usage on slow/restricted networks and large documents

@@ -21,7 +21,7 @@ table extraction, layout cleaning, and a built-in quality gate.
 - **9 MCP tools** — `pdf_to_markdown`, `get_job_status`, `download_models`, `extract_tables`, `classify_document`, `pdf_info`, `setup_vlm`, `check_environment`, `install_engine`
 - **Async job mode** — large PDFs convert in a background job (no MCP client timeouts); model downloads can be pre-fetched without time limits
 - **Optional VLM enhancement** — plug in any vision-capable model (Qwen-VL, GLM-4V, MiniMax, Moonshot, OpenAI, local Ollama…) for better table/formula extraction. **No extra dependencies needed** — works out of the box with the base install.
-- **Quality gate** — multi-dimensional QC (text completeness, heading structure, formula integrity, table coverage)
+- **Quality gate** — multi-dimensional QC (text completeness, heading structure, formula integrity, table coverage) **plus content-aware audit rules** that catch defects statistical checks miss (control chars, torn numeric columns, fused table headers, content loss)
 - **Progressive setup** — works immediately with zero config; enhance with marker/VLM on demand
 - **Privacy-first** — API keys are stored locally with `chmod 600` and never echoed back in responses
 
@@ -146,6 +146,39 @@ window**. On slow networks this fails with an opaque timeout. Avoid it:
 `check_environment` reports per-model cache status (`models_ready`) and the
 current network configuration, so your agent can diagnose this in one call.
 
+## Quality Audit Rules
+
+Every `pdf_to_markdown` run finishes with a two-layer quality check whose
+results are returned in `qc_report` (verdict, dimension scores, issues, fixes):
+
+1. **Statistical gate** — text completeness (chars/page), heading structure,
+   formula integrity, table coverage. Catches gross failures.
+2. **Content-aware audit** — rules born from a real 75-page paper audit where
+   every actual defect passed the statistical gate unnoticed:
+
+| Rule | Detects | Severity | Auto-fix |
+|------|---------|----------|----------|
+| `MD-101` | Garbled chars (U+FFFD, private-use area) | critical | — |
+| `MD-102` | C0 control chars at in-cell word wraps (e.g. `En\x02lightenment`) | critical | ✅ removed, words rejoined |
+| `MD-103` | Table with an all-empty header row (misread multi-column layout) | warn | — |
+| `MD-104` | Numeric column tearing — scientific notation split across cells (`6 \| 0 \| × 10 \| − 4`, decimal point lost) | critical | — |
+| `MD-105` | Table header fused with the first data row (header cells contain standalone numbers) | critical | — |
+| `MD-106` | Empty `<span></span>` placeholder cells | info | ✅ removed |
+| `MD-201` | Content loss — token-multiset comparison against the PDF text layer (pymupdf, independent of the engine's layout analysis); missing-token examples included | info/warn/critical by ratio | — |
+
+**Auto-fix policy**: only deterministic, information-preserving fixes are
+applied automatically (the sanitized markdown is written back to
+`full_text.md`). Structural defects (`MD-103/104/105`) are located precisely
+but never rewritten — automated guessing could corrupt values further.
+Recommended remediation, in order:
+
+1. Cross-check the affected region with `extract_tables` (pdfplumber — an
+   independent extraction channel that bypasses layout analysis).
+2. Re-run with VLM table enrichment (`setup_vlm`, then
+   `enable_table_enrich=True`).
+3. Any `critical` finding escalates a `PASS` verdict to `WARN`, so agents
+   know to inspect `qc_report.audit_issues` before trusting the output.
+
 ## VLM Enhancement (Optional)
 
 VLM re-extracts complex tables and broken formulas from page images.
@@ -246,7 +279,7 @@ marker (Apache-2.0), pdfplumber (MIT), Table Transformer (MIT), pymupdf4llm (Apa
 - **9 个 MCP 工具** —— `pdf_to_markdown`、`get_job_status`、`download_models`、`extract_tables`、`classify_document`、`pdf_info`、`setup_vlm`、`check_environment`、`install_engine`
 - **异步任务模式** —— 大型 PDF 在后台任务中转换（不再触发 MCP 客户端超时）；模型可提前预下载，不受时间窗口限制
 - **可选 VLM 增强** —— 接入任何具备视觉能力的模型（通义千问 Qwen-VL、智谱 GLM-4V、MiniMax、月之暗面 Moonshot、OpenAI、本地 Ollama 等），提升表格/公式提取质量。**无需额外依赖**，基础安装即可使用。
-- **质量门控** —— 多维度 QC 评估（文本完整度、标题结构、公式完好率、表格覆盖率）
+- **质量门控** —— 多维度 QC 评估（文本完整度、标题结构、公式完好率、表格覆盖率），**另含内容感知审计规则**，捕获统计指标无法发现的缺陷（控制字符、数值列撕裂、表头融合、内容丢失）
 - **渐进式配置** —— 零配置即可工作；按需增强 marker/VLM
 - **隐私优先** —— API Key 以 `chmod 600` 权限本地存储，绝不在响应中回显
 
@@ -357,6 +390,33 @@ marker 引擎首次使用时会在 **300 秒启动窗口内**下载约 2GB 模�
    ```
 
 `check_environment` 会逐一报告模型缓存状态（`models_ready`）和当前网络配置，助手一次调用即可完成诊断。
+
+## 质量审计规则
+
+每次 `pdf_to_markdown` 运行结束时都会执行双层质量检查，结果在 `qc_report`
+中返回（结论、维度分数、问题清单、已修复项）：
+
+1. **统计门控** —— 文本完整度（字符/页）、标题结构、公式完好率、表格覆盖率，捕获粗粒度失败。
+2. **内容感知审计** —— 源自一次真实的 75 页论文审计：当时所有实际缺陷都骗过了统计门控：
+
+| 规则 | 检测内容 | 严重度 | 自动修复 |
+|------|---------|--------|----------|
+| `MD-101` | 乱码字符（U+FFFD、私有区字符） | critical | — |
+| `MD-102` | 单元格内换行处的 C0 控制字符（如 `En\x02lightenment`） | critical | ✅ 移除并拼回断词 |
+| `MD-103` | 全空表头行（多栏版式被误识为表格） | warn | — |
+| `MD-104` | 数值列撕裂 —— 科学计数法被拆进多个单元格（`6 \| 0 \| × 10 \| − 4`，小数点丢失） | critical | — |
+| `MD-105` | 表头与首行数据融合（表头单元格含独立数字） | critical | — |
+| `MD-106` | 空 `<span></span>` 占位单元格 | info | ✅ 移除 |
+| `MD-201` | 内容丢失 —— 与 PDF 文本层（pymupdf，独立于引擎版面分析的通道）做 token 多重集比对，附缺失 token 样例 | 按比例 info/warn/critical | — |
+
+**自动修复策略**：仅自动应用确定性、信息无损的修复（修复后的 markdown 会回写
+`full_text.md`）。结构性缺陷（`MD-103/104/105`）只做精确定位、绝不自动改写 ——
+自动猜测可能进一步破坏数值。推荐的补救顺序：
+
+1. 用 `extract_tables`（pdfplumber —— 绕过版面分析的独立提取通道）交叉校验受影响区域；
+2. 开启 VLM 表格增强重新转换（`setup_vlm` + `enable_table_enrich=True`）；
+3. 任何 `critical` 发现都会把 `PASS` 升级为 `WARN`，Agent 应先检查
+   `qc_report.audit_issues` 再信任输出。
 
 ## VLM 增强（可选）
 
