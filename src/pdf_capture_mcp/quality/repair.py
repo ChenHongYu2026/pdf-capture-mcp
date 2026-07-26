@@ -379,12 +379,20 @@ def _repair_content_loss(
     pdf_path: Path | str,
     pages: list[list[Any]],
 ) -> tuple[str, RepairAction]:
-    """Inject missing word runs next to anchors that exist in the markdown."""
-    import fitz
+    """Inject missing word runs next to anchors that exist in the markdown.
 
-    with fitz.open(str(pdf_path)) as doc:
-        pdf_text = " ".join(page.get_text() for page in doc)
-    pdf_counts = Counter(_tokens(pdf_text))
+    Uses the same body-token accounting as MD-201 detection (hyphenation-
+    normalized, figure text excluded) so repair and detection agree on what
+    counts as genuinely missing.
+    """
+    from pdf_capture_mcp.quality.md_audit import _pdf_token_layers
+
+    layers = _pdf_token_layers(pdf_path)
+    if layers is None:
+        return md_text, RepairAction(
+            "MD-201", STATUS_REPORTED, "PDF text layer unavailable for repair."
+        )
+    pdf_counts, _figure = layers
     md_counts = Counter(_tokens(md_text))
     deficit = {t: n - md_counts[t] for t, n in pdf_counts.items() if n > md_counts[t]}
     if not deficit:

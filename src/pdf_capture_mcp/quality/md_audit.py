@@ -274,6 +274,45 @@ def _detect_header_fusion(blocks: list[list[tuple[int, str]]]) -> list[AuditIssu
     return issues
 
 
+def _detect_flattened_group_header(blocks: list[list[tuple[int, str]]]) -> list[AuditIssue]:
+    """MD-107: multi-row group header flattened into single-row labels.
+
+    Wide tables often use a two-row header (group names above metric names).
+    When layout analysis flattens them, group labels get glued onto the wrong
+    metric cells — observed in a real two-column paper as headers like
+    'Knowledge Substring EM' and 'LongMemEval Temporal Substring EM'.
+
+    Signature: two or more header cells that (a) end with an identical metric
+    bigram and (b) carry extra leading words (the misattached group labels).
+    """
+    issues: list[AuditIssue] = []
+    for block in blocks:
+        header_cells = _cells(block[0][1])
+        trailing: dict[str, int] = {}
+        for cell in header_cells:
+            words = cell.split()
+            if len(words) >= 3:  # metric name + at least one glued group word
+                bigram = " ".join(words[-2:]).lower()
+                trailing[bigram] = trailing.get(bigram, 0) + 1
+        repeated = [bg for bg, n in trailing.items() if n >= 2]
+        if repeated:
+            issues.append(
+                AuditIssue(
+                    rule="MD-107",
+                    severity=SEVERITY_WARN,
+                    message=f"Table at line {block[0][0]}: header cells repeat the "
+                    f"trailing metric name(s) {repeated!r} with extra leading words "
+                    "— a multi-row group header was likely flattened, so group "
+                    "labels may be attached to the wrong columns.",
+                    lines=[block[0][0]],
+                    suggestion="Verify column grouping against the source table. "
+                    "Cross-check with extract_tables (pdfplumber) or re-run with "
+                    "VLM table enrichment.",
+                )
+            )
+    return issues
+
+
 def audit_markdown(text: str) -> list[AuditIssue]:
     """Run all content-aware detectors against converted markdown."""
     lines = text.splitlines()
@@ -283,6 +322,7 @@ def audit_markdown(text: str) -> list[AuditIssue]:
     issues += _detect_empty_header(blocks)
     issues += _detect_numeric_tearing(blocks)
     issues += _detect_header_fusion(blocks)
+    issues += _detect_flattened_group_header(blocks)
     return issues
 
 
@@ -290,22 +330,79 @@ def audit_markdown(text: str) -> list[AuditIssue]:
 
 _TOKEN = re.compile(r"[A-Za-z][A-Za-z\-']{3,}")
 
+# Vector-figure region thresholds: ignore hairlines/underline strokes, and
+# only treat reasonably large merged drawing clusters as figures.
+_MIN_FIGURE_SIDE = 30.0
+_MIN_FIGURE_AREA = 4000.0
 
-def check_content_coverage(
-    pdf_path: Path | str,
-    markdown_text: str,
-    max_examples: int = 20,
-) -> AuditIssue | None:
-    """Compare token multisets: PDF text layer (pymupdf) vs converted markdown.
 
-    The PDF text layer is an extraction channel independent of the engine's
-    layout analysis, so tokens present there but missing (or under-counted)
-    in the markdown indicate content dropped during conversion — the class
-    of defect that per-page character counts can never see.
+def _merge_rects(rects: list[Any], pad: float = 5.0) -> list[Any]:
+    """Iteratively union overlapping/nearby rects (page-level counts are small)."""
+    import fitz
 
-    Severity: critical if >5% of token occurrences are missing, warn if >1%,
-    info otherwise (examples included either way, capped at max_examples).
-    Returns None when the text layer is unavailable or the deficit is zero.
+    rects = [fitz.Rect(r) for r in rects]
+    changed = True
+    while changed:
+        changed = False
+        merged: list[Any] = []
+        for r in rects:
+            hit = None
+            for m in merged:
+                if fitz.Rect(m.x0 - pad, m.y0 - pad, m.x1 + pad, m.y1 + pad).intersects(r):
+                    hit = m
+                    break
+            if hit is not None:
+                hit.include_rect(r)
+                changed = True
+            else:
+                merged.append(fitz.Rect(r))
+        rects = merged
+    return rects
+
+
+def _figure_rects(page: Any) -> list[Any]:
+    """Figure regions on a page: merged vector-drawing clusters plus images.
+
+    All drawing fragments (arrows, boxes, short connectors) are merged FIRST
+    and the size filter is applied to the merged clusters only — filtering
+    fragments up front breaks clusters apart and leaves figure text
+    unclassified (observed on a real two-column paper).
+    """
+    import fitz
+
+    rects: list[Any] = []
+    try:
+        for d in page.get_drawings():
+            r = fitz.Rect(d["rect"])
+            if r.width >= 2.0 or r.height >= 2.0:  # skip degenerate specks only
+                rects.append(r)
+        for info in page.get_image_info():
+            rects.append(fitz.Rect(info["bbox"]))
+    except Exception:  # noqa: BLE001 — figure detection is best-effort
+        return []
+    if len(rects) > 3000:  # pathological pages: skip rather than stall
+        return []
+    return [
+        r
+        for r in _merge_rects(rects)
+        if r.get_area() >= _MIN_FIGURE_AREA
+        and r.width >= _MIN_FIGURE_SIDE
+        and r.height >= _MIN_FIGURE_SIDE
+    ]
+
+
+def _pdf_token_layers(pdf_path: Path | str) -> tuple[Counter[str], Counter[str]] | None:
+    """Token multisets from the PDF text layer, split into body vs figure text.
+
+    Two calibrations learned from a real two-column paper audit:
+    - Body words are dehyphenated (a word ending in '-' merges with the next),
+      so line-wrap hyphenation no longer shows up as fake deficits
+      ('manage-' + 'ment' vs the correctly merged 'management').
+    - Words inside vector-figure regions are counted separately: engines
+      export figures as images, so figure-embedded text never reaches the
+      markdown body and must not be billed as body content loss.
+
+    Returns (body_tokens, figure_tokens), or None without a usable text layer.
     """
     try:
         import fitz
@@ -313,21 +410,65 @@ def check_content_coverage(
         logger.warning("pymupdf not available — coverage check skipped")
         return None
 
+    body: Counter[str] = Counter()
+    figure: Counter[str] = Counter()
+    total_chars = 0
     try:
         with fitz.open(str(pdf_path)) as doc:
-            pdf_text = " ".join(page.get_text() for page in doc)
+            for page in doc:
+                regions = _figure_rects(page)
+                body_words: list[str] = []
+                for w in page.get_text("words"):
+                    total_chars += len(w[4])
+                    center = fitz.Point((w[0] + w[2]) / 2, (w[1] + w[3]) / 2)
+                    if any(r.contains(center) for r in regions):
+                        figure.update(t.lower() for t in _TOKEN.findall(w[4]))
+                    else:
+                        body_words.append(w[4])
+                merged_words: list[str] = []
+                skip = False
+                for k, wtext in enumerate(body_words):
+                    if skip:
+                        skip = False
+                        continue
+                    if wtext.endswith("-") and len(wtext) > 1 and k + 1 < len(body_words):
+                        merged_words.append(wtext[:-1] + body_words[k + 1])
+                        skip = True
+                    else:
+                        merged_words.append(wtext)
+                body.update(t.lower() for t in _TOKEN.findall(" ".join(merged_words)))
     except Exception as exc:  # noqa: BLE001 — coverage is best-effort
         logger.warning("Coverage check failed to read PDF: %s", exc)
         return None
 
-    if len(pdf_text.strip()) < 200:  # scanned PDF: no usable text layer
+    if total_chars < 200:  # scanned PDF: no usable text layer
         return None
+    return body, figure
 
-    pdf_tokens = Counter(t.lower() for t in _TOKEN.findall(pdf_text))
+
+def check_content_coverage(
+    pdf_path: Path | str,
+    markdown_text: str,
+    max_examples: int = 20,
+) -> AuditIssue | None:
+    """MD-201: compare BODY token multisets — PDF text layer vs markdown.
+
+    The comparison is hyphenation-normalized and excludes figure-embedded
+    text (reported separately as MD-202), so the deficit ratio reflects
+    genuine body content loss only.
+
+    Severity: critical if >5% of body token occurrences are missing, warn if
+    >1%, info otherwise. Returns None when the text layer is unavailable or
+    the deficit is zero.
+    """
+    layers = _pdf_token_layers(pdf_path)
+    if layers is None:
+        return None
+    body, _figure = layers
     md_tokens = Counter(t.lower() for t in _TOKEN.findall(markdown_text))
 
-    total = sum(pdf_tokens.values())
-    deficits = {t: n - md_tokens[t] for t, n in pdf_tokens.items() if n > md_tokens[t]}
+    total = sum(body.values())
+    deficits = {t: n - md_tokens[t] for t, n in body.items() if n > md_tokens[t]}
     missing = sum(deficits.values())
     if total == 0 or missing == 0:
         return None
@@ -344,11 +485,47 @@ def check_content_coverage(
     return AuditIssue(
         rule="MD-201",
         severity=severity,
-        message=f"{missing}/{total} token occurrences ({ratio:.2%}) from the PDF text "
-        "layer are missing in the markdown. Small deficits are normal "
-        "(hyphenation, page headers, watermarks); review the examples.",
+        message=f"{missing}/{total} body token occurrences ({ratio:.2%}) from the PDF "
+        "text layer are missing in the markdown (hyphenation-normalized; "
+        "figure-embedded text excluded — see MD-202). Small deficits are "
+        "normal (page headers, watermarks); review the examples.",
         suggestion="Search the example tokens in the source PDF to locate dropped "
         f"regions. Examples: {', '.join(examples)}",
+    )
+
+
+def check_figure_text_omission(
+    pdf_path: Path | str,
+    markdown_text: str,
+    max_examples: int = 15,
+) -> AuditIssue | None:
+    """MD-202: text embedded in vector figures that is absent from the body.
+
+    Engines export figures as images, so their embedded text never reaches
+    the markdown flow. This is expected behavior — reported at info level so
+    downstream consumers know transcription requires VLM enrichment.
+    """
+    layers = _pdf_token_layers(pdf_path)
+    if layers is None:
+        return None
+    _body, figure = layers
+    if not figure:
+        return None
+    md_tokens = Counter(t.lower() for t in _TOKEN.findall(markdown_text))
+    deficits = {t: n - md_tokens[t] for t, n in figure.items() if n > md_tokens[t]}
+    missing = sum(deficits.values())
+    if missing == 0:
+        return None
+
+    examples = [t for t, _ in sorted(deficits.items(), key=lambda kv: -kv[1])][:max_examples]
+    return AuditIssue(
+        rule="MD-202",
+        severity=SEVERITY_INFO,
+        message=f"{missing} token occurrence(s) embedded in vector-figure regions "
+        "are not in the markdown body. Figures are exported as images, so "
+        "no body content is lost — expected engine behavior.",
+        suggestion="If figure text matters downstream, enable VLM enrichment "
+        f"(setup_vlm) to transcribe figure regions. Examples: {', '.join(examples)}",
     )
 
 
@@ -386,6 +563,9 @@ def run_markdown_audit(
         coverage = check_content_coverage(pdf_path, text)
         if coverage is not None:
             issues.append(coverage)
+        figure_omission = check_figure_text_omission(pdf_path, text)
+        if figure_omission is not None:
+            issues.append(figure_omission)
 
     counts = {
         SEVERITY_CRITICAL: sum(1 for i in issues if i.severity == SEVERITY_CRITICAL),

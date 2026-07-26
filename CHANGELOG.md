@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] - 2026-07-26
+
+Calibration patch driven by a real two-column paper conversion where the QC
+system produced two false alarms (a wrongful HALT and an inflated content-loss
+ratio). On that document the verdict now moves from HALT to PASS while real
+defects remain reported.
+
+### Fixed
+
+- `qc_gate` formula integrity: single-letter formulas like `$k$`, `$M$`, `$K$`
+  are legitimate math symbols and no longer counted as broken (previously any
+  `len < 2` inner content failed, HALTing documents with few formulas).
+- `MD-201` coverage is now hyphenation-normalized: PDF text-layer words ending
+  in `-` are merged with the next word, so correct dehyphenation in the
+  markdown no longer shows up as fake deficits (~3.4pp on the test paper).
+- `MD-201` no longer bills figure-embedded text as body content loss: words
+  inside merged vector-drawing/image regions are accounted separately.
+
+### Added
+
+- `MD-202` (info): figure-text omission report — tokens embedded in vector
+  figures that never reach the markdown body (expected engine behavior;
+  suggests VLM enrichment when figure text matters).
+- `MD-107` (warn): flattened multi-row group headers — detects wide tables
+  whose header cells repeat identical trailing metric names with extra glued
+  group words (e.g. 'Knowledge Substring EM' / 'Temporal Substring EM').
+- `repair.py` MD-201 injection now uses the same body-token accounting as
+  detection (hyphenation-normalized, figure text excluded).
+
 ## [0.4.0] - 2026-07-26
 
 Closes the loop opened in 0.3.0: defects that could only be DETECTED are now
