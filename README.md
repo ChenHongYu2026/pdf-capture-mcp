@@ -97,6 +97,9 @@ complex layouts, the agent can install marker on demand (or you can pre-install 
 |------|-------------|
 | `pdf_to_markdown` | Full pipeline: extract → clean → QC → repair → self-describing knowledge package (async for large PDFs) |
 | `export_to_obsidian` | Copy a knowledge package into an Obsidian vault as a whole unit (idempotent) |
+| `setup_embedding` | Configure an OpenAI-compatible embedding endpoint (OpenAI / MiniMax / BGE / Ollama) |
+| `build_vector_index` | Index a knowledge package into embedded Qdrant (incremental, content-addressed) |
+| `search_corpus` | Semantic search with metadata filters — this tool IS the RAG API |
 | `get_job_status` | Poll background jobs (large conversions / model downloads) |
 | `download_models` | Pre-download marker models (recommended on slow networks) |
 | `extract_tables` | Table extraction (pdfplumber rules + optional TATR deep learning) |
@@ -430,6 +433,9 @@ Qoder / Claude Desktop / Cursor 用户，在 `mcp.json` 中添加：
 |------|------|
 | `pdf_to_markdown` | 完整管线：提取 → 清洁 → QC → 修复 → 自描述知识包（大文件自动异步） |
 | `export_to_obsidian` | 将知识包作为整体拷入 Obsidian vault（幂等） |
+| `setup_embedding` | 配置 OpenAI 兼容嵌入端点（OpenAI / MiniMax / BGE / Ollama） |
+| `build_vector_index` | 将知识包索引进嵌入式 Qdrant（增量、内容寻址） |
+| `search_corpus` | 带元数据过滤的语义检索 —— 该工具即 RAG API |
 | `get_job_status` | 轮询后台任务（大文件转换 / 模型下载） |
 | `download_models` | 预下载 marker 模型（慢速网络强烈推荐） |
 | `extract_tables` | 表格提取（pdfplumber 规则 + 可选 TATR 深度学习） |

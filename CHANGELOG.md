@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.0] - 2026-07-27
+
+RAG layer: the knowledge packages become a searchable corpus. Qdrant runs
+EMBEDDED by default (zero services, file-persisted) and upgrades to a
+Docker/cluster deployment by setting PDF_CAPTURE_QDRANT_URL — same API,
+zero code changes. This is the "enterprise-grade from day one, enterprise-
+cost from day never" architecture the vector-store evaluation settled on.
+
+### Added
+
+- `embedding_client.py`: OpenAI-compatible /embeddings client (OpenAI,
+  MiniMax embo-01, SiliconFlow/BGE, local Ollama shim). Validation call
+  records vector dimensionality; key stored 0600 or via
+  PDF_CAPTURE_EMBEDDING_API_KEY.
+- `rag_store.py` + three tools:
+  - `setup_embedding` — configure/status/disable.
+  - `build_vector_index` — incremental per-document sync: content-
+    addressed chunk ids make unchanged chunks FREE (only new/changed
+    chunks are embedded, vanished chunks deleted). Enforces the N4
+    staleness contract: refuses to index a package whose main markdown
+    was edited after chunking (content_hash mismatch).
+  - `search_corpus` — dense semantic search + payload filters (doc_id,
+    chunk_type, page range); returns heading_path + page for citation.
+    The MCP tool IS the RAG API — no extra HTTP service to run.
+- Collection schema (enterprise-grade day one): cosine vectors sized from
+  the validated embedding dimension; payload indexes on doc_id /
+  chunk_type / page; point ids are UUIDs derived from chunk_id
+  (idempotent upsert).
+- Optional dependency group `[rag]` (qdrant-client); base install stays
+  lean.
+
 ## [0.7.1] - 2026-07-27
 
 Polish release: the three defects found by the v0.7.0 "stranger agent"
