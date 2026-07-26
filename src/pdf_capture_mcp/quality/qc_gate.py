@@ -66,9 +66,10 @@ def _assess_formula_integrity(text: str) -> float:
     broken = 0
     for f in all_formulas:
         inner = f.strip("$").strip()
-        if not inner or inner == "?" or "???" in inner:
-            broken += 1
-        elif len(inner) < 2:
+        # Only unmistakably damaged content counts as broken. Single-character
+        # formulas like $k$, $M$, $K$ are perfectly legitimate math symbols
+        # (calibrated after a real paper was HALTed for exactly this).
+        if not inner or set(inner) <= {"?"} or "???" in inner:
             broken += 1
 
     return 1.0 - (broken / len(all_formulas)) if all_formulas else 1.0
