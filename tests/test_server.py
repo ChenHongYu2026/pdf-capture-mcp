@@ -33,10 +33,12 @@ class TestServerInit:
             assert "classify_document" in names
             assert "pdf_info" in names
             assert "install_engine" in names
+            assert "download_models" in names
+            assert "get_job_status" in names
             return len(tools)
 
         count = asyncio.run(_check())
-        assert count == 7
+        assert count == 9
 
 
 class TestPdfInfo:
