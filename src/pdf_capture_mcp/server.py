@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import traceback
 from pathlib import Path
@@ -16,6 +17,46 @@ from pdf_capture_mcp.config import get_logger, setup_logging
 setup_logging()
 logger = get_logger("server")
 
+
+def _sanitize_proxy_env() -> None:
+    """Keep localhost traffic off any configured HTTP proxy.
+
+    The marker engine spawns local inference servers (surya / llama.cpp) and
+    health-checks them over 127.0.0.1. If the user has http_proxy/https_proxy
+    set without excluding localhost, those health checks get routed to the
+    proxy and fail until the 300s startup window expires — which surfaces as
+    an opaque timeout. Appending localhost to NO_PROXY prevents that.
+    """
+    proxy_set = any(
+        os.environ.get(var)
+        for var in (
+            "http_proxy",
+            "https_proxy",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "all_proxy",
+            "ALL_PROXY",
+        )
+    )
+    if not proxy_set:
+        return
+    required = ("localhost", "127.0.0.1")
+    for var in ("NO_PROXY", "no_proxy"):
+        current = os.environ.get(var, "")
+        entries = [e.strip() for e in current.split(",") if e.strip()]
+        missing = [host for host in required if host not in entries]
+        if missing:
+            os.environ[var] = ",".join(entries + missing)
+            logger.info(
+                "Proxy detected: appended %s to %s so local inference "
+                "health checks bypass the proxy.",
+                ",".join(missing),
+                var,
+            )
+
+
+_sanitize_proxy_env()
+
 mcp = FastMCP(
     name="pdf-capture",
     version=__version__,
@@ -28,6 +69,13 @@ mcp = FastMCP(
         "- classify_document: Detect document type.\n"
         "- extract_tables: Rule-based table extraction (pdfplumber).\n"
         "- pdf_to_markdown: Full pipeline (uses best available engine).\n\n"
+        "Large PDFs & timeouts:\n"
+        "- pdf_to_markdown runs in mode='auto': small PDFs return inline; "
+        "large PDFs return a job_id immediately (poll with get_job_status). "
+        "This prevents MCP client timeouts on long conversions.\n"
+        "- Slow/blocked networks: run download_models FIRST to pre-fetch "
+        "marker models (supports HF_ENDPOINT mirrors), otherwise the first "
+        "conversion may fail on model downloads.\n\n"
         "Engines (auto-selected by priority: marker > mineru > pymupdf):\n"
         "- pymupdf: Built-in, zero setup, fast. Good for text-based PDFs.\n"
         "- marker: Highest quality for complex layouts. "
@@ -353,6 +401,33 @@ def check_environment() -> str:
             "If installation fails, set: export UV_LINK_MODE=copy"
         )
 
+    # ── Model cache check (marker/surya models) ──────────────────────
+    from pdf_capture_mcp.models import check_model_cache
+
+    model_status = check_model_cache()
+    results["models"] = model_status
+    models_ready = bool(model_status.get("all_cached"))
+    results["models_ready"] = models_ready
+    if model_status.get("available") and not models_ready:
+        missing_models = [
+            name for name, info in model_status.get("models", {}).items() if not info.get("cached")
+        ]
+        results["warnings"].append(
+            "Marker models not cached yet: "
+            + ", ".join(missing_models)
+            + ". First conversion will download them and may be slow or fail "
+            "on restricted networks — run download_models first."
+        )
+
+    # ── Network configuration report (informational only) ────────────────
+    results["network"] = {
+        "hf_endpoint": os.environ.get("HF_ENDPOINT", "(default: huggingface.co)"),
+        "hf_hub_offline": os.environ.get("HF_HUB_OFFLINE", "0") == "1",
+        "hf_hub_disable_xet": os.environ.get("HF_HUB_DISABLE_XET", "0") == "1",
+        "proxy": os.environ.get("https_proxy") or os.environ.get("HTTPS_PROXY") or "",
+        "no_proxy": os.environ.get("NO_PROXY", ""),
+    }
+
     # ── Summary message ─────────────────────────────────────────────────
     if results["ready"]:
         available_engines = [name for name, e in results["engines"].items() if e["available"]]
@@ -361,6 +436,11 @@ def check_environment() -> str:
             f"VLM: {'enabled' if is_vlm_enabled() else 'disabled (rule-based extraction active)'}. "
             "You can now use pdf_to_markdown, extract_tables, classify_document, pdf_info."
         )
+        if model_status.get("available") and not models_ready:
+            results["message"] += (
+                " NOTE: marker models are not fully cached — "
+                "call download_models before the first conversion."
+            )
     else:
         results["message"] = (
             "Environment NOT ready. Please install missing dependencies:\n"
@@ -484,7 +564,242 @@ def install_engine(engine: str = "marker") -> str:
     )
 
 
+# ── Tool 0.8: download_models ─────────────────────────────────────────
+
+
+@mcp.tool()
+def download_models(engine: str = "marker") -> str:
+    """Pre-download all models required by an extraction engine.
+
+    Strongly recommended before the first pdf_to_markdown call on slow or
+    restricted networks. The marker engine normally downloads models lazily
+    inside a 300s inference-server startup window — on slow networks that
+    window expires and the conversion fails with an opaque timeout. This tool
+    downloads the same models WITHOUT any time limit.
+
+    Runs as a background job (downloads total ~2GB). Poll progress with
+    get_job_status(job_id).
+
+    Network tips (e.g. mainland China where huggingface.co is unreachable):
+    - Set HF_ENDPOINT=https://hf-mirror.com to use a mirror. Xet transfer is
+      auto-disabled for mirrors (HF_HUB_DISABLE_XET=1).
+    - If you use an HTTP proxy, keep 'localhost,127.0.0.1' in NO_PROXY
+      (the server enforces this automatically at startup).
+    - Once all models are cached, set HF_HUB_OFFLINE=1 for fully offline runs.
+
+    Args:
+        engine: Engine whose models to download. Currently only 'marker'.
+
+    Returns:
+        JSON with job_id for polling, or already_cached=true if nothing to do.
+    """
+    if engine != "marker":
+        return _json(
+            {
+                "ok": False,
+                "error": f"Unsupported engine: {engine!r}. Only 'marker' has "
+                "pre-downloadable models (mineru manages its own; pymupdf needs none).",
+            }
+        )
+
+    from pdf_capture_mcp.models import check_model_cache, download_marker_models
+
+    status = check_model_cache()
+    if not status.get("available"):
+        return _json(
+            {
+                "ok": False,
+                "error": "marker is not installed — run install_engine first.",
+            }
+        )
+    if status.get("all_cached"):
+        return _json(
+            {
+                "ok": True,
+                "already_cached": True,
+                "models": status["models"],
+                "message": "All marker models are already cached — nothing to download.",
+            }
+        )
+
+    from pdf_capture_mcp.jobs import create_job, update_stage
+
+    def _target(job: dict[str, Any]) -> dict[str, Any]:
+        return download_marker_models(progress=lambda stage: update_stage(job, stage))
+
+    job = create_job("download_models", _target, params={"engine": engine})
+    return _json(
+        {
+            "ok": True,
+            "async": True,
+            "job_id": job["job_id"],
+            "status": job["status"],
+            "models": status["models"],
+            "hint": (
+                f"Model download started (~2GB total). "
+                f"Poll with get_job_status(job_id='{job['job_id']}')."
+            ),
+        }
+    )
+
+
 # ── Tool 1: pdf_to_markdown ─────────────────────────────────────────────────
+
+
+# In mode='auto', PDFs with more pages than this run as a background job.
+ASYNC_PAGE_THRESHOLD = 15
+# Rough marker throughput used only for user-facing ETA hints (min/page).
+_EST_MINUTES_PER_PAGE = 0.4
+
+
+def _parse_page_range(page_range: str) -> list[int] | None:
+    """Parse a page range string like '0-9' or '0,2,5-7' into 0-based indices."""
+    page_range = page_range.strip()
+    if not page_range:
+        return None
+    pages: list[int] = []
+    for part in page_range.split(","):
+        part = part.strip()
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            pages.extend(range(int(start_s), int(end_s) + 1))
+        elif part:
+            pages.append(int(part))
+    return sorted(set(pages))
+
+
+def _quick_page_count(pdf: Path) -> int:
+    """Fast page count via pymupdf (returns 0 if unavailable)."""
+    try:
+        import fitz
+
+        with fitz.open(str(pdf)) as doc:
+            return int(doc.page_count)
+    except Exception:  # noqa: BLE001 — page count is best-effort
+        return 0
+
+
+def _run_pipeline(
+    pdf: Path,
+    *,
+    engine: str,
+    enable_formula: bool,
+    enable_table_enrich: bool,
+    skip_qc: bool,
+    out_dir: str,
+    pages: list[int] | None = None,
+    job: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the full conversion pipeline and return the response dict.
+
+    Shared by the synchronous path and background jobs. When ``job`` is
+    provided, stage transitions are persisted for get_job_status polling.
+    """
+    from pdf_capture_mcp.classifier import classify_document
+    from pdf_capture_mcp.engines import get_engine
+    from pdf_capture_mcp.extractors.tables import extract_tables
+    from pdf_capture_mcp.jobs import update_stage
+    from pdf_capture_mcp.llm_client import is_vlm_enabled
+
+    def _stage(name: str) -> None:
+        if job is not None:
+            update_stage(job, name)
+
+    # Pre-flight: check VLM availability if enrichment requested
+    vlm_notice = ""
+    if enable_table_enrich and not is_vlm_enabled():
+        vlm_notice = (
+            "VLM table enrichment requested but VLM is not configured. "
+            "Call 'setup_vlm' with action='enable' to configure a vision-capable model. "
+            "Falling back to rule-based extraction (still good quality)."
+        )
+
+    # Phase 0: Classify
+    _stage("classify")
+    classification = classify_document(pdf)
+
+    # Phase 1: Extract
+    extraction_dir = Path(out_dir) / "extraction"
+    extraction_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        eng = get_engine(engine)
+    except RuntimeError as engine_err:
+        return {
+            "ok": False,
+            "error": str(engine_err),
+            "stage": "engine_select",
+            "quick_fix": "pip install pdf-capture-mcp[marker]",
+            "alternative": (
+                "The built-in pymupdf engine should be available as a fallback. "
+                "If this error persists, run: pip install pymupdf4llm"
+            ),
+        }
+
+    _stage("extracting")
+    extract_kwargs: dict[str, Any] = {}
+    if pages is not None:
+        # marker expects a range string; pymupdf expects a list of indices.
+        extract_kwargs["pages"] = pages
+        extract_kwargs["page_range"] = ",".join(str(p) for p in pages)
+    extract_report = eng.extract(
+        pdf,
+        extraction_dir,
+        enable_formula=enable_formula,
+        enable_table=True,
+        **extract_kwargs,
+    )
+
+    if not extract_report.ok:
+        return {
+            "ok": False,
+            "error": extract_report.error,
+            "stage": "extract",
+            "engine": eng.name,
+        }
+
+    # Read extracted markdown
+    markdown_text = ""
+    md_path = Path(extract_report.full_text_md)
+    if md_path.exists():
+        markdown_text = md_path.read_text(encoding="utf-8", errors="replace")
+
+    # Phase 2: Table extraction (supplementary)
+    _stage("table_extraction")
+    table_result = extract_tables(pdf, max_tables=30)
+    table_count = table_result.get("stats", {}).get("total_tables", 0)
+
+    # Phase 4: QC (simplified)
+    _stage("qc")
+    qc_verdict = "PASS"
+    if not skip_qc and markdown_text:
+        char_count = len(markdown_text.strip())
+        if char_count < 100:
+            qc_verdict = "WARN"
+        elif char_count == 0:
+            qc_verdict = "HALT"
+
+    return {
+        "ok": qc_verdict != "HALT",
+        "markdown_text": markdown_text,
+        "markdown_path": str(md_path) if md_path.exists() else "",
+        "pipeline_root": str(out_dir),
+        "title": pdf.stem,
+        "engine": eng.name,
+        "classification": {
+            "doc_type": classification.doc_type,
+            "confidence": classification.confidence,
+            "source": classification.source,
+            "has_formulas": classification.has_formulas,
+            "has_tables": classification.has_tables,
+        },
+        "page_count": extract_report.page_count,
+        "table_count": table_count,
+        "image_count": extract_report.image_count,
+        "qc_verdict": qc_verdict,
+        "elapsed_seconds": extract_report.elapsed_seconds,
+        "vlm_notice": vlm_notice,
+    }
 
 
 @mcp.tool()
@@ -496,11 +811,19 @@ def pdf_to_markdown(
     enable_tatr: bool = False,
     skip_qc: bool = False,
     out_dir: str = "",
+    mode: str = "auto",
+    page_range: str = "",
 ) -> str:
     """Convert a PDF document to high-quality structured Markdown.
 
     Pipeline: Engine extraction (marker/MinerU) -> table extraction (pdfplumber)
     -> layout cleaning -> QC quality gate -> output Markdown.
+
+    Large-PDF handling: conversion of big documents can exceed MCP client
+    timeouts. In mode='auto' (default), PDFs above ~15 pages are converted in
+    a background job — the call returns a job_id immediately; poll progress
+    with get_job_status(job_id). The result markdown is always written to
+    <out_dir>/extraction/full_text.md.
 
     Args:
         pdf_path: Absolute path to the PDF file.
@@ -510,109 +833,78 @@ def pdf_to_markdown(
         enable_tatr: Enable TATR deep-learning table structure detection (requires torch).
         skip_qc: Skip quality gate (debug only).
         out_dir: Output directory (auto-created if empty).
+        mode: 'auto' (async for large PDFs), 'sync' (always inline, may time
+            out on large PDFs), or 'async' (always return a job_id).
+        page_range: Optional pages to convert, e.g. '0-9' or '0,2,5-7'
+            (0-based). Useful for a fast preview of a large document.
 
     Returns:
-        JSON with markdown_text, page_count, table_count, qc_verdict, stage_reports.
+        JSON with markdown_text (sync) or job_id + polling hint (async).
     """
     try:
         pdf = _resolve_pdf(pdf_path)
 
-        from pdf_capture_mcp.classifier import classify_document
-        from pdf_capture_mcp.engines import get_engine
-        from pdf_capture_mcp.extractors.tables import extract_tables
-        from pdf_capture_mcp.llm_client import is_vlm_enabled
-
-        # Pre-flight: check VLM availability if enrichment requested
-        vlm_notice = ""
-        if enable_table_enrich and not is_vlm_enabled():
-            vlm_notice = (
-                "VLM table enrichment requested but VLM is not configured. "
-                "Call 'setup_vlm' with action='enable' to configure a vision-capable model. "
-                "Falling back to rule-based extraction (still good quality)."
-            )
-
-        # Phase 0: Classify
-        classification = classify_document(pdf)
-
-        # Phase 1: Extract
-        if not out_dir.strip():
-            out_dir = tempfile.mkdtemp(prefix="pdf_capture_")
-        extraction_dir = Path(out_dir) / "extraction"
-        extraction_dir.mkdir(parents=True, exist_ok=True)
+        if mode not in ("auto", "sync", "async"):
+            return _json({"ok": False, "error": f"Invalid mode: {mode!r}. Use: auto, sync, async"})
 
         try:
-            eng = get_engine(engine)
-        except RuntimeError as engine_err:
+            pages = _parse_page_range(page_range)
+        except ValueError:
             return _json(
-                {
-                    "ok": False,
-                    "error": str(engine_err),
-                    "stage": "engine_select",
-                    "quick_fix": "pip install pdf-capture-mcp[marker]",
-                    "alternative": (
-                        "The built-in pymupdf engine should be available as a fallback. "
-                        "If this error persists, run: pip install pymupdf4llm"
-                    ),
-                }
-            )
-        extract_report = eng.extract(
-            pdf,
-            extraction_dir,
-            enable_formula=enable_formula,
-            enable_table=True,
-        )
-
-        if not extract_report.ok:
-            return _json(
-                {
-                    "ok": False,
-                    "error": extract_report.error,
-                    "stage": "extract",
-                    "engine": eng.name,
-                }
+                {"ok": False, "error": f"Invalid page_range: {page_range!r}. Example: '0-9'"}
             )
 
-        # Read extracted markdown
-        markdown_text = ""
-        md_path = Path(extract_report.full_text_md)
-        if md_path.exists():
-            markdown_text = md_path.read_text(encoding="utf-8", errors="replace")
+        if not out_dir.strip():
+            out_dir = tempfile.mkdtemp(prefix="pdf_capture_")
 
-        # Phase 2: Table extraction (supplementary)
-        table_result = extract_tables(pdf, max_tables=30)
-        table_count = table_result.get("stats", {}).get("total_tables", 0)
+        effective_pages = len(pages) if pages is not None else _quick_page_count(pdf)
+        run_async = mode == "async" or (mode == "auto" and effective_pages > ASYNC_PAGE_THRESHOLD)
 
-        # Phase 4: QC (simplified)
-        qc_verdict = "PASS"
-        if not skip_qc and markdown_text:
-            char_count = len(markdown_text.strip())
-            if char_count < 100:
-                qc_verdict = "WARN"
-            elif char_count == 0:
-                qc_verdict = "HALT"
-
-        response = {
-            "ok": qc_verdict != "HALT",
-            "markdown_text": markdown_text,
-            "markdown_path": str(md_path) if md_path.exists() else "",
-            "pipeline_root": str(out_dir),
-            "title": pdf.stem,
-            "engine": eng.name,
-            "classification": {
-                "doc_type": classification.doc_type,
-                "confidence": classification.confidence,
-                "source": classification.source,
-                "has_formulas": classification.has_formulas,
-                "has_tables": classification.has_tables,
-            },
-            "page_count": extract_report.page_count,
-            "table_count": table_count,
-            "image_count": extract_report.image_count,
-            "qc_verdict": qc_verdict,
-            "elapsed_seconds": extract_report.elapsed_seconds,
-            "vlm_notice": vlm_notice,
+        pipeline_kwargs: dict[str, Any] = {
+            "engine": engine,
+            "enable_formula": enable_formula,
+            "enable_table_enrich": enable_table_enrich,
+            "skip_qc": skip_qc,
+            "out_dir": out_dir,
+            "pages": pages,
         }
-        return _json(response)
+
+        if not run_async:
+            return _json(_run_pipeline(pdf, **pipeline_kwargs))
+
+        from pdf_capture_mcp.jobs import create_job
+
+        def _target(job: dict[str, Any]) -> dict[str, Any]:
+            result = _run_pipeline(pdf, job=job, **pipeline_kwargs)
+            if not result.get("ok"):
+                raise RuntimeError(result.get("error") or "pipeline failed")
+            # Drop the full markdown from persisted job state — clients read
+            # it from markdown_path; keeps job JSON and MCP responses small.
+            result.pop("markdown_text", None)
+            return result
+
+        job = create_job(
+            "pdf_to_markdown",
+            _target,
+            params={"pdf_path": str(pdf), "engine": engine, "out_dir": out_dir},
+        )
+        estimated = max(1, round(effective_pages * _EST_MINUTES_PER_PAGE))
+        return _json(
+            {
+                "ok": True,
+                "async": True,
+                "job_id": job["job_id"],
+                "status": job["status"],
+                "page_count": effective_pages,
+                "estimated_minutes": estimated,
+                "result_path": str(Path(out_dir) / "extraction" / "full_text.md"),
+                "hint": (
+                    f"Conversion started in the background (~{estimated} min). "
+                    f"Poll with get_job_status(job_id='{job['job_id']}'). "
+                    "When done, read the markdown from result_path."
+                ),
+            }
+        )
 
     except Exception as exc:
         return _json(
@@ -622,6 +914,37 @@ def pdf_to_markdown(
                 "traceback": traceback.format_exc()[-500:],
             }
         )
+
+
+@mcp.tool()
+def get_job_status(job_id: str = "") -> str:
+    """Get the status of a background job, or list recent jobs.
+
+    Args:
+        job_id: The job id returned by pdf_to_markdown / download_models.
+            Pass an empty string to list the 10 most recent jobs.
+
+    Returns:
+        JSON with status/stage/elapsed. For finished conversion jobs, includes
+        markdown_path and a short content preview (first 2000 chars).
+    """
+    from pdf_capture_mcp.jobs import get_job, list_recent, public_view
+
+    if not job_id.strip():
+        return _json({"ok": True, "jobs": [public_view(j) for j in list_recent()]})
+
+    job = get_job(job_id.strip())
+    if job is None:
+        return _json({"ok": False, "error": f"Unknown job_id: {job_id!r}"})
+
+    view = public_view(job)
+    result = job.get("result") or {}
+    md_path = result.get("markdown_path", "")
+    if job["status"] == "done" and md_path and Path(md_path).exists():
+        text = Path(md_path).read_text(encoding="utf-8", errors="replace")
+        view["markdown_preview"] = text[:2000]
+        view["markdown_chars"] = len(text)
+    return _json({"ok": True, **view})
 
 
 # ── Tool 2: extract_tables ──────────────────────────────────────────────────
