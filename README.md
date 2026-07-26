@@ -190,6 +190,17 @@ Each repair must pass a machine-checkable verification gate:
 
 Gate passed → patched and re-audited (issue disappears). Gate failed → the
 defect stays reported in `qc_report.repairs` with recovered candidates.
+
+**VLM arbitration (opt-in)**: defects beyond geometric reach — merged
+cells, multi-row group headers — escalate to the configured vision model
+(`setup_vlm`). The broken table's source region is re-read from a hi-res
+page render and replaced with an HTML `<table>` (Markdown tables cannot
+express rowspan/colspan). NUMERIC GATE: the VLM may neither invent numbers
+absent from the region's text layer nor drop numbers from the broken block.
+Enable with `enable_table_enrich=True`. `enrich_figures=True` additionally
+injects VLM descriptions under figure images so figure-embedded content
+(MD-202) becomes retrievable by text-only RAG. Both consume API tokens.
+
 Remaining escalation path:
 
 1. Cross-check the affected region with `extract_tables` (pdfplumber — an
@@ -446,7 +457,16 @@ marker 引擎首次使用时会在 **300 秒启动窗口内**下载约 2GB 模�
   计数（超注入全量回滚），大体量缺失（>5%）拒绝自动注入。
 
 门槛通过 → 打补丁并重新审计（问题从清单消失）；门槛失败 → 缺陷保留在
-`qc_report.repairs` 中并附恢复候选值。后续升级路径：
+`qc_report.repairs` 中并附恢复候选值。
+
+**VLM 仲裁（可选）**：几何修复触及不到的缺陷 —— 合并单元格、多行分组表头 ——
+升级到已配置的视觉模型（`setup_vlm`）：损坏表格的源区域以高清渲染重读，
+替换为 HTML `<table>`（Markdown 表格无法表达 rowspan/colspan）。数值守恒门槛：
+VLM 不得发明区域文本层没有的数字，也不得丢失损坏块里的数字。
+`enable_table_enrich=True` 开启；`enrich_figures=True` 额外在图片下注入 VLM
+描述，让图内信息（MD-202 缺口）可被纯文本 RAG 检索。两者均消耗 API token。
+
+后续升级路径：
 
 1. 用 `extract_tables`（pdfplumber —— 绕过版面分析的独立提取通道）交叉校验受影响区域；
 2. 开启 VLM 表格增强重新转换（`setup_vlm` + `enable_table_enrich=True`）；

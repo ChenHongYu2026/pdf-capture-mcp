@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0] - 2026-07-26
+
+VLM arbitration: the escalation tier for defects beyond geometric reach.
+Geometric repair (0.4.0) reads the text layer but cannot express table
+SEMANTICS — merged cells, multi-row group headers. A vision model reading a
+hi-res page render can. Field-validated with MiniMax-M3 on a real paper's
+hyperparameter table (8 columns, scientific-notation values, sub-scripted
+headers) before implementation.
+
+### Added
+
+- New module `src/pdf_capture_mcp/quality/vlm_repair.py`:
+  - `vlm_repair_table`: locates the source region of a broken table
+    (MD-104/105/107) via token matching, renders a 3x zoom crop, asks the
+    VLM for an exact HTML `<table>` transcription, and replaces the broken
+    markdown block only when the NUMERIC GATE passes.
+  - Numeric gate: the VLM may neither invent numbers absent from the
+    region's text layer (hallucination) nor drop numbers present in the
+    broken block (data loss); torn fragments recombining into decimal
+    values ('6'+'0' -> '6.0') are recognized as legitimate.
+  - `vlm_describe_figures`: injects a short VLM description quoted under
+    each extracted figure image, making figure-embedded content (the
+    MD-202 gap) retrievable by text-only RAG. Idempotent.
+- `pdf_to_markdown`: `enable_table_enrich` is now fully implemented
+  (previously accepted but unused) and gains `enrich_figures: bool = False`.
+  Both are opt-in — VLM calls consume API tokens.
+- Pipeline phase `vlm_arbitration` after geometric repair; actions appear
+  in `qc_report.repairs`, repaired text is re-audited.
+- HTML `<table>` output for complex tables — Markdown tables cannot express
+  rowspan/colspan/multi-level headers; inline HTML renders everywhere.
+
 ## [0.4.3] - 2026-07-26
 
 Field report: every image in converted documents rendered as broken. Root
