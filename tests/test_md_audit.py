@@ -351,3 +351,51 @@ def test_md108_plain_links_not_flagged():
     text = "normal [citation](#page-1-0) link without escapes"
     issues = audit_markdown(text)
     assert not any(i.rule == "MD-108" for i in issues)
+
+
+# ── v0.4.3: MD-109 image-link integrity ─────────────────────────────
+
+
+def test_md109_bare_refs_rewritten_to_images_dir(tmp_path):
+    from pdf_capture_mcp.quality.md_audit import fix_image_links
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "_page_2_Figure_0.jpeg").write_bytes(b"jpg")
+    text = "intro\n\n![](_page_2_Figure_0.jpeg)\n\noutro"
+
+    fixed, fixes, issues = fix_image_links(text, tmp_path)
+    assert "![](images/_page_2_Figure_0.jpeg)" in fixed
+    assert any(f.rule == "MD-109" for f in fixes)
+    assert issues == []
+
+
+def test_md109_valid_refs_untouched(tmp_path):
+    from pdf_capture_mcp.quality.md_audit import fix_image_links
+
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "ok.png").write_bytes(b"png")
+    text = "![](images/ok.png) and remote ![](https://x.test/a.png)"
+
+    fixed, fixes, issues = fix_image_links(text, tmp_path)
+    assert fixed == text
+    assert fixes == [] and issues == []
+
+
+def test_md109_unresolvable_ref_reported(tmp_path):
+    from pdf_capture_mcp.quality.md_audit import fix_image_links
+
+    text = "![](ghost.png)"
+    fixed, fixes, issues = fix_image_links(text, tmp_path)
+    assert fixed == text
+    assert fixes == []
+    assert len(issues) == 1 and issues[0].rule == "MD-109"
+    assert "ghost.png" in issues[0].message
+
+
+def test_md109_wired_into_orchestrator(tmp_path):
+    (tmp_path / "images").mkdir()
+    (tmp_path / "images" / "fig.jpeg").write_bytes(b"jpg")
+    result = run_markdown_audit("![](fig.jpeg)", base_dir=tmp_path)
+    assert result["modified"] is True
+    assert "![](images/fig.jpeg)" in result["text"]
+    assert any(f.rule == "MD-109" for f in result["fixes"])

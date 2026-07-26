@@ -595,17 +595,93 @@ def check_figure_text_omission(
 # ── Orchestrator ────────────────────────────────────────────────────────────
 
 
+_IMG_REF = re.compile(r"!\[[^\]]*\]\(([^)\s]+)\)")
+
+
+def fix_image_links(
+    text: str,
+    base_dir: Path | str,
+    autofix: bool = True,
+) -> tuple[str, list[AuditIssue], list[AuditIssue]]:
+    """MD-109: image references that do not resolve from the markdown's dir.
+
+    Engines may emit bare filenames (``![](_page_2_Figure_0.jpeg)``) while
+    the files are saved into an ``images/`` subdirectory — every image then
+    renders as broken. When the target exists under ``images/<basename>``
+    the reference is rewritten (deterministic, information-preserving);
+    references that resolve nowhere on disk are reported.
+
+    Args:
+        text: Markdown content.
+        base_dir: Directory the markdown file lives in (link resolution root).
+        autofix: Rewrite recoverable references; False = detect only.
+
+    Returns:
+        (text, fixes, issues) — applied rewrites and unresolvable references.
+    """
+    base = Path(base_dir)
+    fixes: list[AuditIssue] = []
+    issues: list[AuditIssue] = []
+    rewritten: list[str] = []
+    broken: list[str] = []
+
+    for ref in dict.fromkeys(_IMG_REF.findall(text)):  # unique, ordered
+        if ref.startswith(("http://", "https://", "data:")):
+            continue
+        if (base / ref).exists():
+            continue
+        candidate = base / "images" / Path(ref).name
+        if candidate.exists():
+            if autofix:
+                text = text.replace(f"]({ref})", f"](images/{Path(ref).name})")
+                rewritten.append(ref)
+            else:
+                broken.append(ref)
+        else:
+            broken.append(ref)
+
+    if rewritten:
+        fixes.append(
+            AuditIssue(
+                rule="MD-109",
+                severity=SEVERITY_WARN,
+                message=f"Rewrote {len(rewritten)} image reference(s) from bare "
+                "filenames to 'images/<name>' — the engine saved files into an "
+                "images/ subdirectory without updating the links, so every "
+                "image rendered as broken.",
+                suggestion="Fixed automatically; links now resolve relative to the markdown file.",
+            )
+        )
+    if broken:
+        issues.append(
+            AuditIssue(
+                rule="MD-109",
+                severity=SEVERITY_WARN,
+                message=f"{len(broken)} image reference(s) do not resolve to any "
+                f"file on disk (checked as-is and under images/): "
+                f"{', '.join(broken[:8])}",
+                suggestion="Verify the extraction output directory is intact; "
+                "re-run the conversion if image files are missing.",
+            )
+        )
+    return text, fixes, issues
+
+
 def run_markdown_audit(
     markdown_text: str,
     pdf_path: Path | str | None = None,
     autofix: bool = True,
+    base_dir: Path | str | None = None,
 ) -> dict[str, Any]:
     """Sanitize (optional) then audit converted markdown.
 
     Args:
         markdown_text: The converted markdown.
         pdf_path: Source PDF for the content-coverage check (skipped if None).
-        autofix: Apply safe deterministic fixes (MD-102, MD-106).
+        autofix: Apply safe deterministic fixes (MD-102, MD-106, MD-108,
+            MD-109 link rewrites).
+        base_dir: Directory the markdown lives in — enables the MD-109
+            image-link integrity check (skipped if None).
 
     Returns:
         {
@@ -621,7 +697,12 @@ def run_markdown_audit(
     if autofix:
         text, fixes = sanitize_markdown(markdown_text)
 
-    issues = audit_markdown(text)
+    img_issues: list[AuditIssue] = []
+    if base_dir is not None:
+        text, img_fixes, img_issues = fix_image_links(text, base_dir, autofix=autofix)
+        fixes += img_fixes
+
+    issues = audit_markdown(text) + img_issues
     if pdf_path is not None:
         coverage = check_content_coverage(pdf_path, text)
         if coverage is not None:
