@@ -1369,6 +1369,143 @@ def search_corpus(
 
 
 @mcp.tool()
+def batch_convert(
+    dir_path: str,
+    out_dir: str = "",
+    vault_path: str = "",
+    category: str = "",
+    index: bool = False,
+    engine: str = "auto",
+    skip_existing: bool = True,
+) -> str:
+    """Convert every PDF in a directory into knowledge packages (async job).
+
+    Runs as a background job (directory-scale work always exceeds MCP
+    timeouts); poll with get_job_status. Per file: convert -> optionally
+    export to an Obsidian vault -> optionally index into the vector store.
+    One file failing never aborts the batch — results carry per-file status.
+
+    Deduplication: doc_id is content-addressed (sha256 of the PDF bytes),
+    so with skip_existing=True a PDF whose package already exists in
+    out_dir is skipped regardless of its filename.
+
+    Args:
+        dir_path: Directory scanned recursively for *.pdf (AppleDouble
+            '._*' files ignored).
+        out_dir: Package root (default $PDF_CAPTURE_OUTPUT_ROOT or
+            ~/Documents/pdf-capture).
+        vault_path: If set, each package is copied into this Obsidian vault.
+        category: Optional vault subfolder (used with vault_path).
+        index: If True and embedding is configured, each package is indexed
+            into the vector store after conversion.
+        engine: Extraction engine ('auto', 'marker', 'mineru').
+        skip_existing: Skip PDFs whose doc_id already has a package.
+
+    Returns:
+        JSON with job_id — poll get_job_status(job_id) for progress/results.
+    """
+    try:
+        src = Path(dir_path).expanduser()
+        if not src.is_dir():
+            return _json({"ok": False, "error": f"Not a directory: {dir_path}"})
+        pdfs = sorted(p for p in src.rglob("*.pdf") if not p.name.startswith("._") and p.is_file())
+        if not pdfs:
+            return _json({"ok": False, "error": f"No PDF files found under {src}"})
+        if not out_dir.strip():
+            out_dir = os.environ.get(
+                "PDF_CAPTURE_OUTPUT_ROOT", str(Path.home() / "Documents" / "pdf-capture")
+            )
+
+        from pdf_capture_mcp.jobs import create_job, update_stage
+
+        def _target(job: dict[str, Any]) -> dict[str, Any]:
+            import json as _json_mod
+
+            from pdf_capture_mcp.packaging import compute_doc_id, export_package_to_vault
+
+            # Existing doc_ids in out_dir (content-addressed dedup)
+            known: dict[str, str] = {}
+            root = Path(out_dir)
+            if root.is_dir():
+                for meta in root.glob("*/data/metadata.json"):
+                    try:
+                        known[_json_mod.loads(meta.read_text())["doc_id"]] = str(meta.parent.parent)
+                    except Exception:  # noqa: BLE001 — foreign folder, ignore
+                        pass
+
+            results: list[dict[str, Any]] = []
+            for n, pdf in enumerate(pdfs, 1):
+                update_stage(job, f"{n}/{len(pdfs)} {pdf.name}")
+                entry: dict[str, Any] = {"file": pdf.name}
+                try:
+                    doc_id = compute_doc_id(pdf)
+                    if skip_existing and doc_id in known:
+                        entry.update(skipped=True, package_dir=known[doc_id])
+                        results.append(entry)
+                        continue
+                    result = _run_pipeline(
+                        pdf,
+                        engine=engine,
+                        enable_formula=True,
+                        out_dir=out_dir,
+                        package=True,
+                    )
+                    entry["ok"] = bool(result.get("ok"))
+                    pkg_dir = result.get("package", {}).get("package_dir", "")
+                    entry["package_dir"] = pkg_dir
+                    entry["qc_verdict"] = result.get("qc_verdict", "")
+                    if pkg_dir:
+                        known[doc_id] = pkg_dir
+                        if vault_path.strip():
+                            exp = export_package_to_vault(pkg_dir, vault_path, category)
+                            entry["vault"] = exp.get("dest", exp.get("error", ""))
+                        if index:
+                            from pdf_capture_mcp.rag_store import (
+                                build_vector_index as _build,
+                            )
+
+                            idx = _build(pkg_dir)
+                            entry["indexed"] = (
+                                idx.get("embedded", 0) if idx.get("ok") else idx.get("error")
+                            )
+                except Exception as exc:  # noqa: BLE001 — batch must not abort
+                    entry["ok"] = False
+                    entry["error"] = str(exc)[:300]
+                results.append(entry)
+
+            converted = sum(1 for r in results if r.get("ok"))
+            skipped = sum(1 for r in results if r.get("skipped"))
+            return {
+                "total": len(pdfs),
+                "converted": converted,
+                "skipped": skipped,
+                "failed": len(pdfs) - converted - skipped,
+                "results": results,
+            }
+
+        job = create_job(
+            "batch_convert",
+            _target,
+            params={"dir_path": str(src), "files": len(pdfs), "out_dir": out_dir},
+        )
+        return _json(
+            {
+                "ok": True,
+                "async": True,
+                "job_id": job["job_id"],
+                "files": len(pdfs),
+                "hint": (
+                    f"Batch conversion of {len(pdfs)} PDFs started. "
+                    f"Poll with get_job_status(job_id='{job['job_id']}')."
+                ),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 — tool boundary
+        logger.error("batch_convert failed: %s", traceback.format_exc())
+        return _json({"ok": False, "error": str(exc)})
+
+
+@mcp.tool()
 def get_job_status(job_id: str = "") -> str:
     """Get the status of a background job, or list recent jobs.
 

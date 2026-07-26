@@ -46,6 +46,7 @@ METADATA_SCHEMA_VERSION = "1"
 # filesystems but break cross-platform sync and Obsidian linking (M3/N10).
 _ILLEGAL = re.compile(r'[\\/:*?"<>|#^\[\]：？＊＂＜＞｜／＼【】]+')
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
+_TAG = re.compile(r"<[^>]+>")
 
 
 def compute_doc_id(pdf_path: Path | str) -> str:
@@ -301,7 +302,8 @@ def build_heading_tree(markdown_text: str) -> list[dict[str, Any]]:
     for line in markdown_text.splitlines():
         m = _HEADING.match(line.strip())
         if m:
-            tree.append({"level": len(m.group(1)), "title": m.group(2).strip()})
+            # Same anchor-stripping as the chunker: metadata stays clean.
+            tree.append({"level": len(m.group(1)), "title": _TAG.sub("", m.group(2)).strip()})
     return tree
 
 

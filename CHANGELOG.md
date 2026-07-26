@@ -5,6 +5,30 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-27
+
+Scale-out release: directory-level batch processing plus the two precision
+items observed during v0.8.x field validation.
+
+### Added
+
+- **`batch_convert` tool**: convert every PDF under a directory into
+  knowledge packages as one background job (poll get_job_status; per-file
+  progress and results, one failure never aborts the batch). Optional
+  per-file vault export and vector indexing. Content-addressed dedup:
+  a PDF whose doc_id already has a package is skipped regardless of
+  filename (skip_existing=True).
+
+### Fixed
+
+- heading_path / heading_tree metadata no longer carry marker's
+  `<span id="page-N">` anchors (main markdown keeps them — internal links
+  still work; citations are now clean).
+- VLM table-region location uses the densest y-band of token hits: stray
+  matches elsewhere on the page (citations sharing a number) no longer
+  inflate the crop — fewer numeric-gate rejections for VLM table repair
+  (the v0.5.x precision item, closed).
+
 ## [0.8.1] - 2026-07-27
 
 Field-validation patch: the v0.8.0 end-to-end test against a real provider

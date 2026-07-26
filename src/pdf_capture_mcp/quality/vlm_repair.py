@@ -114,6 +114,21 @@ def _locate_table_region(
         if best is None or len(best[1]) < 6:  # too few anchors to trust
             return None
         pno, hits = best
+        # Densest y-band (v0.9.0 precision fix): table rows are vertically
+        # CONTIGUOUS. Stray token hits elsewhere on the page (citations,
+        # body text sharing a number) used to inflate the bbox so the VLM
+        # saw a partial/oversized crop and the numeric gate rejected it.
+        # Keep only the largest cluster of hits with <=24pt row gaps.
+        hits.sort(key=lambda r: r.y0)
+        bands: list[list[Any]] = [[hits[0]]]
+        for r in hits[1:]:
+            if r.y0 - bands[-1][-1].y1 <= 24:
+                bands[-1].append(r)
+            else:
+                bands.append([r])
+        hits = max(bands, key=len)
+        if len(hits) < 6:
+            return None
         rect = hits[0]
         for r in hits[1:]:
             rect.include_rect(r)
