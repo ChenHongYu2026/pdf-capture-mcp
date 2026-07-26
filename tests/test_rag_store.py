@@ -24,7 +24,7 @@ DIM = 8
 _TOPICS = ["cat", "finance", "table", "neural"]
 
 
-def _fake_embed(texts: list[str], batch_size: int = 64) -> list[list[float]]:
+def _fake_embed(texts: list[str], batch_size: int = 64, purpose: str = "db") -> list[list[float]]:
     """Deterministic topic-similarity embedding: same topic -> close vectors."""
     out = []
     for t in texts:

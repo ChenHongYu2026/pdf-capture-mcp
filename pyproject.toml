@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pdf-capture-mcp"
-version = "0.8.0"
+version = "0.8.1"
 description = "Multi-phase PDF capture pipeline as an MCP server. Convert PDF to high-quality structured Markdown."
 license = "MIT"
 requires-python = ">=3.11"
