@@ -189,3 +189,123 @@ def test_run_markdown_audit_no_autofix():
     result = run_markdown_audit(dirty, autofix=False)
     assert result["modified"] is False
     assert "\x02" in result["text"]
+
+
+# ── v0.4.1 calibration: MD-107 flattened group header ───────────────────
+
+
+def test_md107_flattened_group_header_detected():
+    # Real pattern from a two-column paper: group names glued onto metric names.
+    text = (
+        "| Method | Exact Match | LoCoMo Temporal Answer F1 | Knowledge Substring EM "
+        "| Update ROUGE-L F1 | LongMemEval Temporal Substring EM | Reasoning ROUGE-L F1 |\n"
+        "|---|---|---|---|---|---|---|\n"
+        "| Long Context | 8.1 | 26.9 | 20.0 | 18.0 | 12.0 | 24.0 |"
+    )
+    issues = audit_markdown(text)
+    hits = [i for i in issues if i.rule == "MD-107"]
+    assert len(hits) == 1
+    assert hits[0].severity == "warn"
+    assert "substring em" in hits[0].message or "rouge-l f1" in hits[0].message
+
+
+def test_md107_normal_wide_header_not_flagged():
+    # Distinct headers without repeated trailing metric bigrams must pass.
+    text = (
+        "| Method | Exact Match | Answer F1 | Substring EM | ROUGE-L F1 |\n"
+        "|---|---|---|---|---|\n"
+        "| Long Context | 8.1 | 26.9 | 20.0 | 18.0 |"
+    )
+    issues = audit_markdown(text)
+    assert not any(i.rule == "MD-107" for i in issues)
+
+
+# ── v0.4.1 calibration: MD-201 dehyphenation ───────────────────────────
+
+
+@pytest.fixture()
+def hyphenated_pdf(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    pdf = tmp_path / "hyph.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    # Line-wrap hyphenation in the text layer: 'manage-' / 'ment'
+    lines = [
+        "The platform provides persistent storage plus reliable manage-",
+        "ment for every workload under continuous operation today.",
+        "Additional sentences ensure the text layer clears the guard.",
+        "Operational dashboards summarize throughput and latency curves.",
+    ]
+    for n, ln in enumerate(lines):
+        page.insert_text((72, 72 + n * 18), ln)
+    doc.save(str(pdf))
+    doc.close()
+    return pdf
+
+
+def test_md201_dehyphenation_no_false_deficit(hyphenated_pdf):
+    # Markdown correctly merged the hyphenated word -> no deficit reported.
+    md = (
+        "The platform provides persistent storage plus reliable management "
+        "for every workload under continuous operation today. "
+        "Additional sentences ensure the text layer clears the guard. "
+        "Operational dashboards summarize throughput and latency curves."
+    )
+    assert check_content_coverage(hyphenated_pdf, md) is None
+
+
+# ── v0.4.1 calibration: MD-202 figure-text separation ───────────────────
+
+
+@pytest.fixture()
+def figure_pdf(tmp_path):
+    fitz = pytest.importorskip("fitz")
+    pdf = tmp_path / "fig.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    body_lines = [
+        "The architecture diagram below illustrates the routing design.",
+        "Body paragraphs continue with detailed explanations afterwards.",
+        "Further discussion covers evaluation methodology and results.",
+    ]
+    for n, ln in enumerate(body_lines):
+        page.insert_text((72, 72 + n * 18), ln)
+    # Vector figure region (drawing) with embedded labels inside it.
+    rect = fitz.Rect(72, 300, 400, 460)
+    page.draw_rect(rect, color=(0, 0, 0), width=1)
+    page.insert_text((90, 340), "RouterNode dispatches EncoderNode payloads")
+    page.insert_text((90, 370), "StorageNode persists VectorIndex shards")
+    doc.save(str(pdf))
+    doc.close()
+    return pdf
+
+
+def test_md202_figure_text_not_billed_as_body_loss(figure_pdf):
+    from pdf_capture_mcp.quality.md_audit import check_figure_text_omission
+
+    # Markdown has the full body but none of the figure-embedded labels.
+    md = (
+        "The architecture diagram below illustrates the routing design. "
+        "Body paragraphs continue with detailed explanations afterwards. "
+        "Further discussion covers evaluation methodology and results."
+    )
+    body_issue = check_content_coverage(figure_pdf, md)
+    # Figure labels must NOT surface as body loss (None or tiny info only).
+    assert body_issue is None or body_issue.severity == "info"
+    fig_issue = check_figure_text_omission(figure_pdf, md)
+    assert fig_issue is not None
+    assert fig_issue.rule == "MD-202"
+    assert fig_issue.severity == "info"
+    assert "routernode" in fig_issue.suggestion.lower()
+
+
+# ── v0.4.1 calibration: single-letter formulas are legitimate ─────────────
+
+
+def test_single_letter_formula_not_broken():
+    from pdf_capture_mcp.quality.qc_gate import _assess_formula_integrity
+
+    assert _assess_formula_integrity("inline $k$ and $M$ and $K$ math") == 1.0
+    # Genuinely broken content still fails.
+    assert _assess_formula_integrity("broken $?$ formula") == 0.0
+    assert _assess_formula_integrity("broken $a???b$ formula") == 0.0
