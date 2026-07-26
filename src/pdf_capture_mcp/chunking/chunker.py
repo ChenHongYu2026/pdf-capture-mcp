@@ -206,7 +206,10 @@ def _drop_running_headers(blocks: list[_Block], min_repeats: int = 4) -> list[st
         if b.kind == "text":
             for ln in b.lines:
                 s = ln.strip()
-                if 0 < len(s) < 60:
+                # Header candidates must carry actual content — pure
+                # punctuation lines ('---' rules, '***') are markdown
+                # structure, not running headers (v0.7.1 fix).
+                if 0 < len(s) < 60 and re.search(r"[A-Za-z0-9\u4e00-\u9fff]", s):
                     counts[s] = counts.get(s, 0) + 1
     repeated = {s for s, c in counts.items() if c >= min_repeats}
     if not repeated:

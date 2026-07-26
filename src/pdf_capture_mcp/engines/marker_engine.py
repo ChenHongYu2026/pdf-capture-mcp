@@ -138,11 +138,21 @@ class MarkerEngine:
 
             elapsed = round(time.time() - t0, 2)
 
-            # Count pages from metadata
+            # Count pages from metadata; marker's metadata key set varies
+            # across versions — fall back to counting via pymupdf so the
+            # knowledge package never reports "0 pages" (v0.7.1 fix).
             page_count = 0
             metadata = getattr(rendered, "metadata", {}) or {}
             if isinstance(metadata, dict):
                 page_count = metadata.get("page_count", 0)
+            if not page_count:
+                try:
+                    import fitz
+
+                    with fitz.open(str(pdf_path)) as _doc:
+                        page_count = len(_doc)
+                except Exception:  # noqa: BLE001 — count stays 0 if even this fails
+                    pass
 
             logger.info(
                 "Marker extraction complete: %d chars, %d images, %.1fs",
