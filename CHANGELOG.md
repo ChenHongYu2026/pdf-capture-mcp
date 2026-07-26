@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.1] - 2026-07-27
+
+Polish release: the three defects found by the v0.7.0 "stranger agent"
+acceptance test (a zero-context agent scored the package 9/10; these were
+the deductions).
+
+### Fixed
+
+- marker engine could report page_count=0 (metadata key varies across
+  versions) -> pymupdf fallback count; READMEs no longer say "0 pages".
+- `---` thematic breaks were mistaken for repeated running headers by the
+  chunker's N12 filter; header candidates now require actual content.
+- Summary extraction collapses marker's ligature-echo artifact
+  ("task-speciﬁc ﬁne-tuning task-specific fine-tuning") via NFKC folding +
+  adjacent n-gram dedup; distant legitimate repetition untouched.
+
 ## [0.7.0] - 2026-07-27
 
 Knowledge packages: from "conversion output" to a self-describing knowledge

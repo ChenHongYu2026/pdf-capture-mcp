@@ -330,3 +330,23 @@ def test_md110_reports_separate_tables(tmp_path):
 def test_md110_ignores_different_column_counts():
     md = "| a | b |\n|---|---|\n| 1 | 2 |\n\n| x | y | z |\n|---|---|---|\n| 3 | 4 | 5 |\n"
     assert detect_cross_page_tables(md) == []
+
+
+# ── v0.7.1 polish fixes ─────────────────────────────────────────────────────
+
+
+def test_horizontal_rules_not_dropped_as_headers():
+    """'---' thematic breaks are markdown structure, not running headers."""
+    parts = [f"# S{i}\n\nBody {i}.\n\n---\n" for i in range(6)]
+    result = chunk_markdown("\n".join(parts), DOC)
+    assert "---" not in result["dropped_headers"]
+
+
+def test_summary_ligature_echo_collapsed():
+    from pdf_capture_mcp.packaging import _dedup_ligature_echo
+
+    s = _dedup_ligature_echo("requires task-speciﬁc ﬁne-tuning task-specific fine-tuning datasets")
+    assert s == "requires task-specific fine-tuning datasets"
+    # Legitimate distant repetition is untouched
+    t = "models are models of the world"
+    assert _dedup_ligature_echo(t) == t

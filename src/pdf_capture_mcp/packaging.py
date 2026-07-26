@@ -81,6 +81,33 @@ def file_sha256(path: Path) -> str:
 # ── Summary extraction (N7: honest degradation chain) ───────────────────────
 
 
+def _dedup_ligature_echo(text: str) -> str:
+    """Collapse marker's ligature-echo artifact (v0.7.1 fix).
+
+    The engine sometimes emits a phrase twice — once with typographic
+    ligatures, once without: 'task-speciﬁc ﬁne-tuning task-specific
+    fine-tuning'. After NFKC folding (ﬁ -> fi) the echo becomes an exact
+    adjacent repeat, which we collapse. Only ADJACENT repeats of 2-6 word
+    groups are removed — legitimate distant repetition is never touched.
+    """
+    text = unicodedata.normalize("NFKC", text)
+    words = text.split()
+    out: list[str] = []
+    i = 0
+    while i < len(words):
+        collapsed = False
+        for n in range(6, 1, -1):
+            if i + 2 * n <= len(words) and words[i : i + n] == words[i + n : i + 2 * n]:
+                out.extend(words[i : i + n])
+                i += 2 * n
+                collapsed = True
+                break
+        if not collapsed:
+            out.append(words[i])
+            i += 1
+    return " ".join(out)
+
+
 def extract_summary(markdown_text: str) -> tuple[str, str]:
     """Return (summary, source). Never fabricates: abstract -> first
     substantial paragraph -> honest 'unavailable'."""
@@ -99,13 +126,13 @@ def extract_summary(markdown_text: str) -> tuple[str, str]:
                 elif para:
                     break
             if para:
-                return " ".join(para)[:600], "abstract"
+                return _dedup_ligature_echo(" ".join(para))[:600], "abstract"
 
     # 2) First substantial paragraph (skip ToC-ish and boilerplate lines)
     def _qualify(para_lines: list[str]) -> str | None:
         text = " ".join(para_lines)
         if len(text) > 150 and text.count(".") + text.count("。") >= 2:
-            return text[:600]
+            return _dedup_ligature_echo(text)[:600]
         return None
 
     para = []
