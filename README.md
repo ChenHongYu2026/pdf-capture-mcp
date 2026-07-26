@@ -18,7 +18,8 @@ table extraction, layout cleaning, and a built-in quality gate.
   - [pymupdf4llm](https://github.com/pymupdf/pymupdf4llm) (built-in) — zero setup, fast, always available
   - [marker](https://github.com/datalab-to/marker) (recommended) — highest quality for complex layouts
   - [MinerU](https://github.com/opendatalab/MinerU) (optional) — best for multi-column/InDesign PDFs, auto-managed in an isolated venv
-- **7 MCP tools** — `pdf_to_markdown`, `extract_tables`, `classify_document`, `pdf_info`, `setup_vlm`, `check_environment`, `install_engine`
+- **9 MCP tools** — `pdf_to_markdown`, `get_job_status`, `download_models`, `extract_tables`, `classify_document`, `pdf_info`, `setup_vlm`, `check_environment`, `install_engine`
+- **Async job mode** — large PDFs convert in a background job (no MCP client timeouts); model downloads can be pre-fetched without time limits
 - **Optional VLM enhancement** — plug in any vision-capable model (Qwen-VL, GLM-4V, MiniMax, Moonshot, OpenAI, local Ollama…) for better table/formula extraction. **No extra dependencies needed** — works out of the box with the base install.
 - **Quality gate** — multi-dimensional QC (text completeness, heading structure, formula integrity, table coverage)
 - **Progressive setup** — works immediately with zero config; enhance with marker/VLM on demand
@@ -94,13 +95,56 @@ complex layouts, the agent can install marker on demand (or you can pre-install 
 
 | Tool | Description |
 |------|-------------|
-| `pdf_to_markdown` | Full pipeline: extract → clean → QC → structured Markdown |
+| `pdf_to_markdown` | Full pipeline: extract → clean → QC → structured Markdown (async for large PDFs) |
+| `get_job_status` | Poll background jobs (large conversions / model downloads) |
+| `download_models` | Pre-download marker models (recommended on slow networks) |
 | `extract_tables` | Table extraction (pdfplumber rules + optional TATR deep learning) |
 | `classify_document` | Document type detection (academic paper, consulting report, …) |
 | `pdf_info` | Fast metadata: page count, text layer, scanned detection |
 | `setup_vlm` | Configure optional VLM enhancement (any vision-capable provider) |
-| `check_environment` | Verify engines, dependencies, and filesystem compatibility |
+| `check_environment` | Verify engines, dependencies, model cache, and network config |
 | `install_engine` | Install marker/ml engines on behalf of the user |
+
+## Large PDFs & Timeouts
+
+Converting a big document (e.g. a 75-page paper) can take longer than most MCP
+client timeouts. `pdf_to_markdown` handles this automatically:
+
+- **`mode="auto"`** (default): PDFs ≤ 15 pages return inline; larger PDFs start a
+  **background job** and immediately return a `job_id` with an ETA — no client timeout.
+- **`mode="async"`**: always return a `job_id`. **`mode="sync"`**: always inline
+  (previous behavior; may time out on large files).
+- Poll with `get_job_status(job_id)` — it reports the current stage
+  (`classify → extracting → table_extraction → qc → done`) and, when finished,
+  the `markdown_path` plus a content preview.
+- The result is always written to `<out_dir>/extraction/full_text.md`, so even if
+  a client disconnects, nothing is lost.
+- Need a fast preview? Pass `page_range="0-9"` to convert only the first pages.
+
+## Slow / Restricted Networks (e.g. mainland China)
+
+The marker engine downloads ~2GB of models on first use — **inside a 300s startup
+window**. On slow networks this fails with an opaque timeout. Avoid it:
+
+1. **Pre-download models first** (no time limit, runs as a background job):
+   ask your agent to run `download_models`, then poll `get_job_status`.
+2. **huggingface.co unreachable?** Use a mirror — the Xet-incompatibility
+   workaround (`HF_HUB_DISABLE_XET=1`) is applied automatically:
+   ```bash
+   export HF_ENDPOINT=https://hf-mirror.com
+   ```
+3. **Using an HTTP proxy?** Localhost must bypass it, or internal inference
+   health checks fail. The server enforces `NO_PROXY=localhost,127.0.0.1`
+   automatically at startup — but check your client config if you override env.
+   Note: some setups exclude `huggingface.co` from the proxy via `NO_PROXY`;
+   remove that entry if you want HF downloads to go through the proxy.
+4. **All models cached?** Go fully offline for reliable startups:
+   ```bash
+   export HF_HUB_OFFLINE=1
+   ```
+
+`check_environment` reports per-model cache status (`models_ready`) and the
+current network configuration, so your agent can diagnose this in one call.
 
 ## VLM Enhancement (Optional)
 
@@ -141,10 +185,14 @@ Models (~2GB) auto-download from ModelScope on first extraction.
 |----------|---------|-------------|
 | `PDF_CAPTURE_ENGINE` | `auto` | Default engine: `marker` / `mineru` / `pymupdf` / `auto` |
 | `PDF_CAPTURE_VLM_API_KEY` | — | VLM API key (preferred over passing in chat) |
-| `PDF_CAPTURE_CACHE_DIR` | `~/.cache/pdf-capture-mcp` | Model & config cache |
+| `PDF_CAPTURE_CACHE_DIR` | `~/.cache/pdf-capture-mcp` | Model & config cache (also stores job state) |
 | `PDF_CAPTURE_MINERU_VENV` | `<cache>/venv-mineru` | MinerU venv location |
 | `PDF_CAPTURE_LOG_LEVEL` | `INFO` | Logging level |
 | `MINERU_MODEL_SOURCE` | `modelscope` | MinerU model source: `modelscope` / `huggingface` / `local` |
+| `HF_ENDPOINT` | huggingface.co | HuggingFace mirror for model downloads (e.g. `https://hf-mirror.com`) |
+| `HF_HUB_DISABLE_XET` | — | Set `1` when using a mirror (auto-set by `download_models`) |
+| `HF_HUB_OFFLINE` | — | Set `1` after all models are cached for fully offline runs |
+| `NO_PROXY` | — | Must include `localhost,127.0.0.1` when a proxy is set (auto-enforced) |
 
 ## Development
 
@@ -164,7 +212,11 @@ uv run mypy src/pdf_capture_mcp/
 | `Operation not supported` during install | External/exFAT drive: `export UV_LINK_MODE=copy` then retry |
 | `uvx: command not found` | Install uv: `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | MCP server not appearing in tools | Restart your MCP client; check `mcp.json` syntax |
-| marker engine slow on first run | Downloads ~1GB models on first use; cached afterwards |
+| MCP call times out on a large PDF | Expected with `mode="sync"` — use the default `mode="auto"` and poll `get_job_status`; the result is still written to `out_dir` |
+| First conversion fails with `fast_layout/ocr_error server failed to become healthy` | Model download exceeded the 300s startup window — run `download_models` first |
+| Downloads stall on huggingface.co | Set `HF_ENDPOINT=https://hf-mirror.com` (see Slow Networks section) |
+| All health checks fail behind a proxy | Ensure `NO_PROXY` includes `localhost,127.0.0.1` (auto-enforced at startup) |
+| marker engine slow on first run | Downloads ~2GB models on first use; run `download_models` ahead of time |
 | Python version too low | Requires 3.11+: `uv python install 3.11` |
 
 ## License
@@ -191,7 +243,8 @@ marker (Apache-2.0), pdfplumber (MIT), Table Transformer (MIT), pymupdf4llm (Apa
   - [pymupdf4llm](https://github.com/pymupdf/pymupdf4llm)（内置）—— 零配置、快速、始终可用
   - [marker](https://github.com/datalab-to/marker)（推荐）—— 复杂版面提取质量最高
   - [MinerU](https://github.com/opendatalab/MinerU)（可选）—— 多栏/InDesign 排版最佳，自动管理独立虚拟环境
-- **7 个 MCP 工具** —— `pdf_to_markdown`、`extract_tables`、`classify_document`、`pdf_info`、`setup_vlm`、`check_environment`、`install_engine`
+- **9 个 MCP 工具** —— `pdf_to_markdown`、`get_job_status`、`download_models`、`extract_tables`、`classify_document`、`pdf_info`、`setup_vlm`、`check_environment`、`install_engine`
+- **异步任务模式** —— 大型 PDF 在后台任务中转换（不再触发 MCP 客户端超时）；模型可提前预下载，不受时间窗口限制
 - **可选 VLM 增强** —— 接入任何具备视觉能力的模型（通义千问 Qwen-VL、智谱 GLM-4V、MiniMax、月之暗面 Moonshot、OpenAI、本地 Ollama 等），提升表格/公式提取质量。**无需额外依赖**，基础安装即可使用。
 - **质量门控** —— 多维度 QC 评估（文本完整度、标题结构、公式完好率、表格覆盖率）
 - **渐进式配置** —— 零配置即可工作；按需增强 marker/VLM
@@ -266,13 +319,44 @@ Qoder / Claude Desktop / Cursor 用户，在 `mcp.json` 中添加：
 
 | 工具 | 说明 |
 |------|------|
-| `pdf_to_markdown` | 完整管线：提取 → 清洁 → QC → 结构化 Markdown |
+| `pdf_to_markdown` | 完整管线：提取 → 清洁 → QC → 结构化 Markdown（大文件自动异步） |
+| `get_job_status` | 轮询后台任务（大文件转换 / 模型下载） |
+| `download_models` | 预下载 marker 模型（慢速网络强烈推荐） |
 | `extract_tables` | 表格提取（pdfplumber 规则 + 可选 TATR 深度学习） |
 | `classify_document` | 文档类型检测（学术论文、咨询报告等） |
 | `pdf_info` | 快速元数据：页数、文本层、扫描件检测 |
 | `setup_vlm` | 配置可选的 VLM 增强（支持任何具备视觉能力的供应商） |
-| `check_environment` | 校验引擎、依赖和文件系统兼容性 |
+| `check_environment` | 校验引擎、依赖、模型缓存与网络配置 |
 | `install_engine` | 代用户安装 marker/ml 引擎 |
+
+## 大文件与超时
+
+转换大型文档（如 75 页论文）的耗时往往超过 MCP 客户端超时限制。
+`pdf_to_markdown` 会自动处理：
+
+- **`mode="auto"`**（默认）：≤ 15 页直接返回结果；更大的 PDF 自动转为**后台任务**，立即返回 `job_id` 和预估耗时 —— 不再触发客户端超时。
+- **`mode="async"`**：总是返回 `job_id`。**`mode="sync"`**：保持旧版同步行为（大文件可能超时）。
+- 用 `get_job_status(job_id)` 轮询进度，可看到当前阶段（`classify → extracting → table_extraction → qc → done`）；完成后返回 `markdown_path` 和内容预览。
+- 结果始终写入 `<out_dir>/extraction/full_text.md`，即使客户端断开也不丢失。
+- 需要快速预览？传 `page_range="0-9"` 只转换前几页。
+
+## 慢速 / 受限网络（如中国大陆）
+
+marker 引擎首次使用时会在 **300 秒启动窗口内**下载约 2GB 模型 ——
+慢速网络下必然超时失败。规避方法：
+
+1. **先预下载模型**（无时间限制，后台任务运行）：让助手调用 `download_models`，再用 `get_job_status` 轮询。
+2. **连不上 huggingface.co？** 使用镜像站（Xet 协议兼容问题会自动处理，即自动设置 `HF_HUB_DISABLE_XET=1`）：
+   ```bash
+   export HF_ENDPOINT=https://hf-mirror.com
+   ```
+3. **使用 HTTP 代理？** localhost 必须绕过代理，否则内部推理服务的健康检查会被代理劫持而失败。服务启动时会自动确保 `NO_PROXY` 包含 `localhost,127.0.0.1`。另注意：若你的环境把 `huggingface.co` 加入了 `NO_PROXY`（即 HF 不走代理），想让 HF 下载走代理时需移除该条目。
+4. **模型全部缓存完成后**，建议开启完全离线模式，启动更稳定：
+   ```bash
+   export HF_HUB_OFFLINE=1
+   ```
+
+`check_environment` 会逐一报告模型缓存状态（`models_ready`）和当前网络配置，助手一次调用即可完成诊断。
 
 ## VLM 增强（可选）
 
@@ -313,10 +397,14 @@ pdf-capture-mcp setup-mineru   # 需要 PATH 中有 Python 3.11
 |------|--------|------|
 | `PDF_CAPTURE_ENGINE` | `auto` | 默认引擎：`marker` / `mineru` / `pymupdf` / `auto` |
 | `PDF_CAPTURE_VLM_API_KEY` | — | VLM API Key（推荐方式，避免对话中传递） |
-| `PDF_CAPTURE_CACHE_DIR` | `~/.cache/pdf-capture-mcp` | 模型与配置缓存目录 |
+| `PDF_CAPTURE_CACHE_DIR` | `~/.cache/pdf-capture-mcp` | 模型与配置缓存目录（同时存储任务状态） |
 | `PDF_CAPTURE_MINERU_VENV` | `<cache>/venv-mineru` | MinerU 虚拟环境位置 |
 | `PDF_CAPTURE_LOG_LEVEL` | `INFO` | 日志级别 |
 | `MINERU_MODEL_SOURCE` | `modelscope` | MinerU 模型源：`modelscope` / `huggingface` / `local` |
+| `HF_ENDPOINT` | huggingface.co | HuggingFace 镜像站（如 `https://hf-mirror.com`） |
+| `HF_HUB_DISABLE_XET` | — | 使用镜像站时设为 `1`（`download_models` 会自动设置） |
+| `HF_HUB_OFFLINE` | — | 模型全部缓存后设为 `1`，完全离线运行 |
+| `NO_PROXY` | — | 设置代理时必须包含 `localhost,127.0.0.1`（启动时自动保障） |
 
 ## 本地开发
 
@@ -336,7 +424,11 @@ uv run mypy src/pdf_capture_mcp/
 | 安装时报 `Operation not supported` | 外置/exFAT 磁盘：`export UV_LINK_MODE=copy` 后重试 |
 | `uvx: command not found` | 安装 uv：`curl -LsSf https://astral.sh/uv/install.sh \| sh` |
 | MCP 服务器未出现在工具列表 | 重启 MCP 客户端；检查 `mcp.json` 格式 |
-| marker 引擎首次运行慢 | 首次使用需下载约 1GB 模型，后续使用缓存 |
+| 大 PDF 转换时 MCP 调用超时 | `mode="sync"` 下属预期行为 —— 使用默认 `mode="auto"` 并轮询 `get_job_status`；结果仍会写入 `out_dir` |
+| 首次转换报 `fast_layout/ocr_error server failed to become healthy` | 模型下载超出 300 秒启动窗口 —— 先运行 `download_models` |
+| huggingface.co 下载卡住 | 设置 `HF_ENDPOINT=https://hf-mirror.com`（见“慢速网络”一节） |
+| 挂代理后所有健康检查失败 | 确保 `NO_PROXY` 包含 `localhost,127.0.0.1`（启动时自动保障） |
+| marker 引擎首次运行慢 | 首次使用需下载约 2GB 模型，建议提前运行 `download_models` |
 | Python 版本过低 | 需要 3.11+：`uv python install 3.11` |
 
 ## 许可证
