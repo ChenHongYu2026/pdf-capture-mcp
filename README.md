@@ -170,7 +170,23 @@ results are returned in `qc_report` (verdict, dimension scores, issues, fixes):
 applied automatically (the sanitized markdown is written back to
 `full_text.md`). Structural defects (`MD-103/104/105`) are located precisely
 but never rewritten — automated guessing could corrupt values further.
-Recommended remediation, in order:
+
+**Cross-channel repair (repair-or-report)**: with `auto_repair=True`
+(default), structural defects get a repair attempt against the PDF text
+layer (pymupdf word geometry — independent of the engine's layout analysis).
+Each repair must pass a machine-checkable verification gate:
+
+- `MD-104`: recovered value minus decimal points must equal the joined
+  fragments — digits are never altered, only the lost `.` restored.
+- `MD-105`: the table is rebuilt from word geometry; the token multiset must
+  be conserved — content is rearranged, never invented.
+- `MD-201`: missing word runs are injected next to anchors present in the
+  markdown; no token may exceed its PDF count (over-injection rolls back),
+  and bulk deficits (>5%) are refused.
+
+Gate passed → patched and re-audited (issue disappears). Gate failed → the
+defect stays reported in `qc_report.repairs` with recovered candidates.
+Remaining escalation path:
 
 1. Cross-check the affected region with `extract_tables` (pdfplumber — an
    independent extraction channel that bypasses layout analysis).
@@ -410,8 +426,19 @@ marker 引擎首次使用时会在 **300 秒启动窗口内**下载约 2GB 模�
 | `MD-201` | 内容丢失 —— 与 PDF 文本层（pymupdf，独立于引擎版面分析的通道）做 token 多重集比对，附缺失 token 样例 | 按比例 info/warn/critical | — |
 
 **自动修复策略**：仅自动应用确定性、信息无损的修复（修复后的 markdown 会回写
-`full_text.md`）。结构性缺陷（`MD-103/104/105`）只做精确定位、绝不自动改写 ——
-自动猜测可能进一步破坏数值。推荐的补救顺序：
+`full_text.md`）。
+
+**跨通道修复（repair-or-report）**：`auto_repair=True`（默认）时，结构性缺陷会
+基于 PDF 文本层（pymupdf 词几何 —— 独立于引擎版面分析的通道）尝试修复，
+每项修复必须通过机器可验证的门槛：
+
+- `MD-104`：恢复值去掉小数点后必须与碎片拼接完全相等 —— 数字永不改变，只找回丢失的 `.`；
+- `MD-105`：整表从词几何重建，token 多重集必须守恒 —— 只重排、绝不发明内容；
+- `MD-201`：缺失词段注入到 markdown 中已存在的锚点旁；任何 token 不得超出 PDF
+  计数（超注入全量回滚），大体量缺失（>5%）拒绝自动注入。
+
+门槛通过 → 打补丁并重新审计（问题从清单消失）；门槛失败 → 缺陷保留在
+`qc_report.repairs` 中并附恢复候选值。后续升级路径：
 
 1. 用 `extract_tables`（pdfplumber —— 绕过版面分析的独立提取通道）交叉校验受影响区域；
 2. 开启 VLM 表格增强重新转换（`setup_vlm` + `enable_table_enrich=True`）；

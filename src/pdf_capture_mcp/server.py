@@ -687,6 +687,7 @@ def _run_pipeline(
     enable_table_enrich: bool,
     skip_qc: bool,
     out_dir: str,
+    auto_repair: bool = True,
     pages: list[int] | None = None,
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -770,6 +771,7 @@ def _run_pipeline(
     table_count = table_result.get("stats", {}).get("total_tables", 0)
 
     # Phase 3: Content-aware audit (auto-fix safe defects, detect the rest)
+    # + Phase 3.5: cross-channel repair (repair-or-report)
     # + Phase 4: multi-dimensional QC gate
     _stage("qc")
     qc_verdict = "PASS"
@@ -779,9 +781,31 @@ def _run_pipeline(
         from pdf_capture_mcp.quality.qc_gate import run_qc_gate
 
         audit = run_markdown_audit(markdown_text, pdf_path=pdf, autofix=True)
-        if audit["modified"]:
-            # Persist sanitized markdown (control chars / placeholder cleanup)
-            markdown_text = audit["text"]
+        markdown_text = audit["text"]
+        audit_issues = audit["issues"]
+        audit_counts = audit["counts"]
+
+        # Phase 3.5: structural defects get a cross-channel repair attempt
+        # against the PDF text layer. Verified repairs are applied; failed
+        # attempts stay as reported issues with recovered candidates.
+        repair_actions: list[dict[str, Any]] = []
+        repairable = [i for i in audit_issues if i.rule in ("MD-104", "MD-105", "MD-201")]
+        if auto_repair and repairable:
+            from pdf_capture_mcp.quality.repair import repair_markdown
+
+            _stage("repair")
+            rep = repair_markdown(markdown_text, pdf, repairable)
+            repair_actions = [vars(a) for a in rep["actions"]]
+            if rep["modified"]:
+                markdown_text = rep["text"]
+                # Re-audit the repaired text: verified repairs clear their
+                # issues; anything left is genuinely outstanding.
+                post = run_markdown_audit(markdown_text, pdf_path=pdf, autofix=False)
+                audit_issues = post["issues"]
+                audit_counts = post["counts"]
+
+        if markdown_text != audit["text"] or audit["modified"]:
+            # Persist sanitized/repaired markdown
             md_path.write_text(markdown_text, encoding="utf-8")
 
         gate = run_qc_gate(
@@ -792,17 +816,18 @@ def _run_pipeline(
         qc_verdict = gate.verdict
         # Content-aware critical findings escalate a PASS to WARN: the text
         # may look statistically fine while specific tables/values are broken.
-        if qc_verdict == "PASS" and audit["counts"]["critical"] > 0:
+        if qc_verdict == "PASS" and audit_counts["critical"] > 0:
             qc_verdict = "WARN"
 
         qc_report = {
             "verdict": qc_verdict,
             "dimensions": gate.dimensions,
-            "audit_counts": audit["counts"],
+            "audit_counts": audit_counts,
             # Plain dicts so both MCP JSON responses and persisted job state
             # serialize cleanly.
             "audit_fixes": [vars(f) for f in audit["fixes"]],
-            "audit_issues": [vars(i) for i in audit["issues"]],
+            "audit_issues": [vars(i) for i in audit_issues],
+            "repairs": repair_actions,
         }
     elif not markdown_text:
         qc_verdict = "HALT"
@@ -842,6 +867,7 @@ def pdf_to_markdown(
     out_dir: str = "",
     mode: str = "auto",
     page_range: str = "",
+    auto_repair: bool = True,
 ) -> str:
     """Convert a PDF document to high-quality structured Markdown.
 
@@ -866,6 +892,11 @@ def pdf_to_markdown(
             out on large PDFs), or 'async' (always return a job_id).
         page_range: Optional pages to convert, e.g. '0-9' or '0,2,5-7'
             (0-based). Useful for a fast preview of a large document.
+        auto_repair: Attempt cross-channel repair of structural defects
+            (torn numeric cells, fused headers, dropped text) using the PDF
+            text layer. Repairs are applied only when a verification gate
+            passes; otherwise the defect is reported with candidates
+            (repair-or-report). Set False to keep the raw engine output.
 
     Returns:
         JSON with markdown_text (sync) or job_id + polling hint (async).
@@ -895,6 +926,7 @@ def pdf_to_markdown(
             "enable_table_enrich": enable_table_enrich,
             "skip_qc": skip_qc,
             "out_dir": out_dir,
+            "auto_repair": auto_repair,
             "pages": pages,
         }
 

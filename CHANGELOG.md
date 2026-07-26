@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] - 2026-07-26
+
+Closes the loop opened in 0.3.0: defects that could only be DETECTED are now
+REPAIRED when a verification gate passes ("repair-or-report" guarantee — no
+defect is ever silently guessed at, and none silently passes).
+
+### Added
+
+- New module `src/pdf_capture_mcp/quality/repair.py` — cross-channel repair
+  using the pymupdf text layer (independent of engine layout analysis):
+  - `MD-104` torn scientific notation: true cell values recovered from
+    text-layer word runs. GATE: candidate minus decimal points must equal
+    the joined fragments — digits are never changed, only the lost '.'
+    restored.
+  - `MD-105` fused table headers: the whole table is rebuilt from text-layer
+    word geometry (columns via x-interval clustering). GATE: token multiset
+    conservation — content is rearranged, never invented.
+  - `MD-201` content loss: missing word runs re-injected next to anchors
+    that exist in the markdown. GATES: per-token counts may never exceed the
+    PDF text layer (over-injection rolls back everything); bulk deficits
+    (>5%) are refused and reported.
+- Pipeline phase `repair` between audit and QC gate; verified repairs are
+  re-audited so cleared issues disappear from `qc_report.audit_issues`;
+  all attempts (repaired and reported) listed in `qc_report.repairs` with
+  evidence strings.
+- `pdf_to_markdown` gains `auto_repair: bool = True`.
+- Regression corpus `tests/test_repair.py`: synthetic golden PDFs reproduce
+  each defect class; gates are proven to refuse mismatched sources.
+
 ## [0.3.0] - 2026-07-26
 
 Driven by a manual quality audit of a real 75-page paper conversion: every
