@@ -29,3 +29,7 @@ htmlcov/
 # Local artifacts
 *.log
 tmp/
+._*
+.pytest_cache/
+.ruff_cache/
+.venv/

@@ -14,13 +14,14 @@ table extraction, layout cleaning, and a built-in quality gate.
 
 ## Features
 
-- **Dual extraction engines**
-  - [marker](https://github.com/datalab-to/marker) (default) — fast, accurate, zero special setup
-  - [MinerU](https://github.com/opendatalab/MinerU) (optional) — highest quality for complex layouts, auto-managed in an isolated venv
-- **6 MCP tools** — `pdf_to_markdown`, `extract_tables`, `classify_document`, `pdf_info`, `setup_vlm`, `check_environment`
-- **Optional VLM enhancement** — plug in any vision-capable model (Qwen-VL, GLM-4V, MiniMax, Moonshot, OpenAI, local Ollama…) for better table/formula extraction
+- **Triple extraction engines**
+  - [pymupdf4llm](https://github.com/pymupdf/pymupdf4llm) (built-in) — zero setup, fast, always available
+  - [marker](https://github.com/datalab-to/marker) (recommended) — highest quality for complex layouts
+  - [MinerU](https://github.com/opendatalab/MinerU) (optional) — best for multi-column/InDesign PDFs, auto-managed in an isolated venv
+- **7 MCP tools** — `pdf_to_markdown`, `extract_tables`, `classify_document`, `pdf_info`, `setup_vlm`, `check_environment`, `install_engine`
+- **Optional VLM enhancement** — plug in any vision-capable model (Qwen-VL, GLM-4V, MiniMax, Moonshot, OpenAI, local Ollama…) for better table/formula extraction. **No extra dependencies needed** — works out of the box with the base install.
 - **Quality gate** — multi-dimensional QC (text completeness, heading structure, formula integrity, table coverage)
-- **Guided onboarding** — the server walks your AI agent through VLM setup and environment checks on first use
+- **Progressive setup** — works immediately with zero config; enhance with marker/VLM on demand
 - **Privacy-first** — API keys are stored locally with `chmod 600` and never echoed back in responses
 
 ## Quick Start
@@ -28,19 +29,32 @@ table extraction, layout cleaning, and a built-in quality gate.
 ### 1. Install
 
 ```bash
-# Base package (rule-based extraction, ~50MB)
+# Base package (pymupdf engine + VLM support, ~80MB) — works immediately
 pip install pdf-capture-mcp
 
-# With marker engine (recommended, includes PyTorch)
+# With marker engine (recommended for complex PDFs, includes PyTorch, ~2.5GB)
 pip install "pdf-capture-mcp[marker]"
 
-# Everything (marker + TATR table detection + DePlot charts)
+# Everything (marker + TATR table detection + DePlot charts, ~3GB)
 pip install "pdf-capture-mcp[all]"
 ```
 
 ### 2. Add to your MCP client
 
 For Qoder / Claude Desktop / Cursor, add to your `mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "pdf-capture": {
+      "command": "uvx",
+      "args": ["pdf-capture-mcp"]
+    }
+  }
+}
+```
+
+With marker engine (recommended):
 
 ```json
 {
@@ -73,7 +87,8 @@ Ask your AI agent things like:
 > "Extract all tables from this report"
 > "Is this PDF a scanned document?"
 
-On first use, the agent will guide you through optional VLM setup and verify your environment.
+The server works immediately with the built-in pymupdf engine. For higher quality on
+complex layouts, the agent can install marker on demand (or you can pre-install it).
 
 ## Tools
 
@@ -84,7 +99,8 @@ On first use, the agent will guide you through optional VLM setup and verify you
 | `classify_document` | Document type detection (academic paper, consulting report, …) |
 | `pdf_info` | Fast metadata: page count, text layer, scanned detection |
 | `setup_vlm` | Configure optional VLM enhancement (any vision-capable provider) |
-| `check_environment` | Verify engines and dependencies are ready |
+| `check_environment` | Verify engines, dependencies, and filesystem compatibility |
+| `install_engine` | Install marker/ml engines on behalf of the user |
 
 ## VLM Enhancement (Optional)
 
@@ -123,7 +139,7 @@ Models (~2GB) auto-download from ModelScope on first extraction.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PDF_CAPTURE_ENGINE` | `auto` | Default engine: `marker` / `mineru` / `auto` |
+| `PDF_CAPTURE_ENGINE` | `auto` | Default engine: `marker` / `mineru` / `pymupdf` / `auto` |
 | `PDF_CAPTURE_VLM_API_KEY` | — | VLM API key (preferred over passing in chat) |
 | `PDF_CAPTURE_CACHE_DIR` | `~/.cache/pdf-capture-mcp` | Model & config cache |
 | `PDF_CAPTURE_MINERU_VENV` | `<cache>/venv-mineru` | MinerU venv location |
@@ -140,6 +156,16 @@ uv run pytest tests/ -v
 uv run ruff check src/ tests/
 uv run mypy src/pdf_capture_mcp/
 ```
+
+## Troubleshooting
+
+| Problem | Solution |
+|---------|----------|
+| `Operation not supported` during install | External/exFAT drive: `export UV_LINK_MODE=copy` then retry |
+| `uvx: command not found` | Install uv: `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| MCP server not appearing in tools | Restart your MCP client; check `mcp.json` syntax |
+| marker engine slow on first run | Downloads ~1GB models on first use; cached afterwards |
+| Python version too low | Requires 3.11+: `uv python install 3.11` |
 
 ## License
 
@@ -161,13 +187,14 @@ marker (Apache-2.0), pdfplumber (MIT), Table Transformer (MIT), pymupdf4llm (Apa
 
 ## 功能特性
 
-- **双提取引擎**
-  - [marker](https://github.com/datalab-to/marker)（默认）—— 快速、准确、零特殊配置
-  - [MinerU](https://github.com/opendatalab/MinerU)（可选）—— 复杂版面提取质量最高，自动管理独立虚拟环境
-- **6 个 MCP 工具** —— `pdf_to_markdown`、`extract_tables`、`classify_document`、`pdf_info`、`setup_vlm`、`check_environment`
-- **可选 VLM 增强** —— 接入任何具备视觉能力的模型（通义千问 Qwen-VL、智谱 GLM-4V、MiniMax、月之暗面 Moonshot、OpenAI、本地 Ollama 等），提升表格/公式提取质量
+- **三提取引擎**
+  - [pymupdf4llm](https://github.com/pymupdf/pymupdf4llm)（内置）—— 零配置、快速、始终可用
+  - [marker](https://github.com/datalab-to/marker)（推荐）—— 复杂版面提取质量最高
+  - [MinerU](https://github.com/opendatalab/MinerU)（可选）—— 多栏/InDesign 排版最佳，自动管理独立虚拟环境
+- **7 个 MCP 工具** —— `pdf_to_markdown`、`extract_tables`、`classify_document`、`pdf_info`、`setup_vlm`、`check_environment`、`install_engine`
+- **可选 VLM 增强** —— 接入任何具备视觉能力的模型（通义千问 Qwen-VL、智谱 GLM-4V、MiniMax、月之暗面 Moonshot、OpenAI、本地 Ollama 等），提升表格/公式提取质量。**无需额外依赖**，基础安装即可使用。
 - **质量门控** —— 多维度 QC 评估（文本完整度、标题结构、公式完好率、表格覆盖率）
-- **引导式初始化** —— 首次使用时，服务器会引导 AI 助手完成 VLM 配置和环境检查
+- **渐进式配置** —— 零配置即可工作；按需增强 marker/VLM
 - **隐私优先** —— API Key 以 `chmod 600` 权限本地存储，绝不在响应中回显
 
 ## 快速开始
@@ -175,19 +202,32 @@ marker (Apache-2.0), pdfplumber (MIT), Table Transformer (MIT), pymupdf4llm (Apa
 ### 1. 安装
 
 ```bash
-# 基础包（规则提取，约 50MB）
+# 基础包（pymupdf 引擎 + VLM 支持，约 80MB）—— 安装即可用
 pip install pdf-capture-mcp
 
-# 含 marker 引擎（推荐，包含 PyTorch）
+# 含 marker 引擎（推荐复杂 PDF，包含 PyTorch，约 2.5GB）
 pip install "pdf-capture-mcp[marker]"
 
-# 完整安装（marker + TATR 表格检测 + DePlot 图表提取）
+# 完整安装（marker + TATR 表格检测 + DePlot 图表提取，约 3GB）
 pip install "pdf-capture-mcp[all]"
 ```
 
 ### 2. 添加到 MCP 客户端
 
 Qoder / Claude Desktop / Cursor 用户，在 `mcp.json` 中添加：
+
+```json
+{
+  "mcpServers": {
+    "pdf-capture": {
+      "command": "uvx",
+      "args": ["pdf-capture-mcp"]
+    }
+  }
+}
+```
+
+含 marker 引擎（推荐）：
 
 ```json
 {
@@ -216,11 +256,11 @@ Qoder / Claude Desktop / Cursor 用户，在 `mcp.json` 中添加：
 
 直接对你的 AI 助手说：
 
-> "把 ~/Downloads/论文.pdf 转成 Markdown"
-> "提取这份报告里的所有表格"
-> "这个 PDF 是扫描件吗？"
+> “把 ~/Downloads/论文.pdf 转成 Markdown”
+> “提取这份报告里的所有表格”
+> “这个 PDF 是扫描件吗？”
 
-首次使用时，助手会引导你完成可选的 VLM 配置和环境校验。
+服务器使用内置 pymupdf 引擎即可立即工作。对于复杂版面，助手可按需安装 marker 引擎。
 
 ## 工具列表
 
@@ -231,7 +271,8 @@ Qoder / Claude Desktop / Cursor 用户，在 `mcp.json` 中添加：
 | `classify_document` | 文档类型检测（学术论文、咨询报告等） |
 | `pdf_info` | 快速元数据：页数、文本层、扫描件检测 |
 | `setup_vlm` | 配置可选的 VLM 增强（支持任何具备视觉能力的供应商） |
-| `check_environment` | 校验引擎与依赖是否就绪 |
+| `check_environment` | 校验引擎、依赖和文件系统兼容性 |
+| `install_engine` | 代用户安装 marker/ml 引擎 |
 
 ## VLM 增强（可选）
 
@@ -270,7 +311,7 @@ pdf-capture-mcp setup-mineru   # 需要 PATH 中有 Python 3.11
 
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
-| `PDF_CAPTURE_ENGINE` | `auto` | 默认引擎：`marker` / `mineru` / `auto` |
+| `PDF_CAPTURE_ENGINE` | `auto` | 默认引擎：`marker` / `mineru` / `pymupdf` / `auto` |
 | `PDF_CAPTURE_VLM_API_KEY` | — | VLM API Key（推荐方式，避免对话中传递） |
 | `PDF_CAPTURE_CACHE_DIR` | `~/.cache/pdf-capture-mcp` | 模型与配置缓存目录 |
 | `PDF_CAPTURE_MINERU_VENV` | `<cache>/venv-mineru` | MinerU 虚拟环境位置 |
@@ -287,6 +328,16 @@ uv run pytest tests/ -v
 uv run ruff check src/ tests/
 uv run mypy src/pdf_capture_mcp/
 ```
+
+## 故障排查
+
+| 问题 | 解决方案 |
+|------|----------|
+| 安装时报 `Operation not supported` | 外置/exFAT 磁盘：`export UV_LINK_MODE=copy` 后重试 |
+| `uvx: command not found` | 安装 uv：`curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| MCP 服务器未出现在工具列表 | 重启 MCP 客户端；检查 `mcp.json` 格式 |
+| marker 引擎首次运行慢 | 首次使用需下载约 1GB 模型，后续使用缓存 |
+| Python 版本过低 | 需要 3.11+：`uv python install 3.11` |
 
 ## 许可证
 

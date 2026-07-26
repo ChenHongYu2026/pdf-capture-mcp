@@ -10,10 +10,11 @@ from pdf_capture_mcp.config import (
     get_logger,
 )
 from pdf_capture_mcp.engines.base import ExtractEngine
-from pdf_capture_mcp.engines.marker_engine import MarkerEngine
-from pdf_capture_mcp.engines.mineru_engine import MineruEngine
 
 logger = get_logger("engines")
+
+# Engine name for the lightweight pymupdf fallback
+ENGINE_PYMUPDF = "pymupdf"
 
 # Cached engine instances
 _engines: dict[str, ExtractEngine] = {}
@@ -22,8 +23,11 @@ _engines: dict[str, ExtractEngine] = {}
 def get_engine(name: str = "") -> ExtractEngine:
     """Get an extraction engine by name.
 
+    Engines are lazily imported and instantiated on first access.
+    Priority for 'auto': marker > mineru > pymupdf.
+
     Args:
-        name: Engine name ('marker', 'mineru', 'auto'). Defaults to env config.
+        name: Engine name ('marker', 'mineru', 'pymupdf', 'auto'). Defaults to env config.
 
     Returns:
         An ExtractEngine instance.
@@ -35,8 +39,8 @@ def get_engine(name: str = "") -> ExtractEngine:
         name = get_default_engine()
 
     if name == ENGINE_AUTO:
-        # Prefer marker, fallback to mineru
-        for candidate in (ENGINE_MARKER, ENGINE_MINERU):
+        # Prefer marker, fallback to mineru, then pymupdf (always available)
+        for candidate in (ENGINE_MARKER, ENGINE_MINERU, ENGINE_PYMUPDF):
             try:
                 engine = get_engine(candidate)
                 if engine.is_available():
@@ -51,13 +55,21 @@ def get_engine(name: str = "") -> ExtractEngine:
 
     if name not in _engines:
         if name == ENGINE_MARKER:
+            from pdf_capture_mcp.engines.marker_engine import MarkerEngine
+
             _engines[name] = MarkerEngine()
         elif name == ENGINE_MINERU:
+            from pdf_capture_mcp.engines.mineru_engine import MineruEngine
+
             _engines[name] = MineruEngine()
+        elif name == ENGINE_PYMUPDF:
+            from pdf_capture_mcp.engines.pymupdf_engine import PymupdfEngine
+
+            _engines[name] = PymupdfEngine()
         else:
-            raise RuntimeError(f"Unknown engine: {name!r}. Valid: marker, mineru, auto")
+            raise RuntimeError(f"Unknown engine: {name!r}. Valid: marker, mineru, pymupdf, auto")
 
     return _engines[name]
 
 
-__all__ = ["ExtractEngine", "MarkerEngine", "MineruEngine", "get_engine"]
+__all__ = ["ExtractEngine", "MarkerEngine", "MineruEngine", "PymupdfEngine", "get_engine"]

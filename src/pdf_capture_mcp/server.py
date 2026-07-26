@@ -23,25 +23,24 @@ mcp = FastMCP(
         "PDF Capture Pipeline — multi-phase PDF document extraction service. "
         "Converts PDF to high-quality structured Markdown with formula recognition, "
         "table extraction, layout cleaning, and quality control.\n\n"
-        "Onboarding flow (execute in order on first interaction):\n"
-        "1. Call 'setup_vlm' with action='status' to check VLM configuration.\n"
-        "2. If VLM not configured, ask the user:\n"
-        "   - VLM enhances table/formula recognition using a vision-capable AI model.\n"
-        "   - Requires: a VLM-capable model name, API key, and API endpoint URL.\n"
-        "   - Supports any provider with vision model capability "
-        "(e.g. Qwen-VL, Zhipu/GLM-4V, MiniMax, Moonshot, DeepSeek, OpenAI, local Ollama).\n"
-        "   - Warning: Using VLM will consume your API tokens.\n"
-        "   - SECURITY: Never display or log the user's API key. "
-        "Guide the user to set PDF_CAPTURE_VLM_API_KEY as an environment variable, "
-        "or pass it directly (it will be stored locally and never echoed back).\n"
-        "   - If user agrees: collect model name + api_base, confirm API key is set, "
-        "then call setup_vlm(action='enable', ...).\n"
-        "   - If setup fails (bad key or no vision support): inform user and ask to retry.\n"
-        "   - If user declines: proceed without VLM (rule-based extraction still works well).\n"
-        "3. Call 'check_environment' to verify all dependencies are installed.\n"
-        "4. If environment NOT ready: show the user the missing dependencies and "
-        "install commands. Wait for user to install before proceeding.\n"
-        "5. If environment ready: inform the user and begin processing tasks."
+        "Quick start (tools work immediately, no setup required):\n"
+        "- pdf_info: Get PDF metadata and page count.\n"
+        "- classify_document: Detect document type.\n"
+        "- extract_tables: Rule-based table extraction (pdfplumber).\n"
+        "- pdf_to_markdown: Full pipeline (uses best available engine).\n\n"
+        "Engines (auto-selected by priority: marker > mineru > pymupdf):\n"
+        "- pymupdf: Built-in, zero setup, fast. Good for text-based PDFs.\n"
+        "- marker: Highest quality for complex layouts. "
+        "Install: pip install pdf-capture-mcp[marker]\n"
+        "- mineru: Best for multi-column/InDesign. Setup: pdf-capture-mcp setup-mineru\n\n"
+        "Optional enhancements (configure when user requests):\n"
+        "1. VLM enhancement: Call 'setup_vlm' to configure a vision-capable model "
+        "for better table/formula extraction. Supports any OpenAI-compatible provider "
+        "(Qwen-VL, GLM-4V, MiniMax, Moonshot, OpenAI, Ollama). "
+        "API key via PDF_CAPTURE_VLM_API_KEY env var. Consumes tokens.\n"
+        "2. Environment check: Call 'check_environment' to verify all dependencies.\n"
+        "3. Engine install: Call 'install_engine' to install marker on behalf of the user.\n\n"
+        "SECURITY: Never display or log the user's API key."
     ),
 )
 
@@ -215,18 +214,21 @@ def setup_vlm(
 def check_environment() -> str:
     """Check if all runtime dependencies are ready for PDF extraction.
 
-    Call this after VLM setup to verify the environment is ready before
-    running extraction tasks. Reports missing dependencies with install commands.
+    Call this to verify the environment is ready before running extraction tasks.
+    Reports available engines, missing dependencies with install commands,
+    and filesystem compatibility warnings.
 
     Checks:
-    - Extraction engine availability (marker or MinerU)
+    - Extraction engine availability (marker, MinerU, pymupdf)
     - Core libraries (pdfplumber, pymupdf, numpy, Pillow)
     - Optional features (TATR/torch, VLM client)
+    - Filesystem compatibility (symlink support, cache dir writability)
 
     Returns:
         JSON with ready status, available engines, missing deps, and install hints.
     """
     import importlib
+    import os
 
     results: dict[str, Any] = {
         "ok": True,
@@ -234,13 +236,14 @@ def check_environment() -> str:
         "engines": {},
         "dependencies": {},
         "missing": [],
+        "warnings": [],
     }
 
     # ── Check extraction engines ────────────────────────────────────────
     # Marker
     try:
         importlib.import_module("marker")
-        results["engines"]["marker"] = {"available": True, "note": "Default engine"}
+        results["engines"]["marker"] = {"available": True, "note": "Highest quality engine"}
     except ImportError:
         results["engines"]["marker"] = {
             "available": False,
@@ -252,11 +255,24 @@ def check_environment() -> str:
 
     mineru_python = get_mineru_venv_dir() / "bin" / "python3"
     if mineru_python.exists():
-        results["engines"]["mineru"] = {"available": True, "note": "High-quality engine"}
+        results["engines"]["mineru"] = {"available": True, "note": "Complex layout engine"}
     else:
         results["engines"]["mineru"] = {
             "available": False,
             "install": "pdf-capture-mcp setup-mineru (requires Python 3.11)",
+        }
+
+    # Pymupdf (always available as base dependency)
+    try:
+        importlib.import_module("pymupdf4llm")
+        results["engines"]["pymupdf"] = {
+            "available": True,
+            "note": "Built-in lightweight engine (always available)",
+        }
+    except ImportError:
+        results["engines"]["pymupdf"] = {
+            "available": False,
+            "install": "pip install pymupdf4llm",
         }
 
     # At least one engine must be available
@@ -308,6 +324,35 @@ def check_environment() -> str:
 
     results["vlm"] = {"enabled": is_vlm_enabled()}
 
+    # ── Filesystem compatibility check ────────────────────────────────────
+    from pdf_capture_mcp.config import get_cache_dir
+
+    cache_dir = get_cache_dir()
+    if not os.access(str(cache_dir), os.W_OK):
+        results["warnings"].append(
+            f"Cache dir {cache_dir} is not writable. "
+            "Set PDF_CAPTURE_CACHE_DIR to a local disk path."
+        )
+
+    # Check symlink support (common issue on external/exFAT drives)
+    import tempfile
+
+    try:
+        test_dir = tempfile.mkdtemp(prefix="pdfcap_symlink_test_", dir=str(cache_dir))
+        test_link = Path(test_dir) / "test_link"
+        test_target = Path(test_dir) / "test_target"
+        test_target.write_text("test")
+        test_link.symlink_to(test_target)
+        # Cleanup
+        test_link.unlink()
+        test_target.unlink()
+        Path(test_dir).rmdir()
+    except OSError:
+        results["warnings"].append(
+            "Current filesystem does not support symlinks (common on external/exFAT drives). "
+            "If installation fails, set: export UV_LINK_MODE=copy"
+        )
+
     # ── Summary message ─────────────────────────────────────────────────
     if results["ready"]:
         available_engines = [name for name, e in results["engines"].items() if e["available"]]
@@ -322,7 +367,124 @@ def check_environment() -> str:
             + "\n".join(f"  - {m}" for m in results["missing"])
         )
 
+    if results["warnings"]:
+        results["message"] += "\n\nWarnings:\n" + "\n".join(
+            f"  - {w}" for w in results["warnings"]
+        )
+
     return _json(results)
+
+
+# ── Tool 0.7: install_engine ────────────────────────────────────────────────
+
+
+@mcp.tool()
+def install_engine(engine: str = "marker") -> str:
+    """Install an extraction engine into the current Python environment.
+
+    Attempts to install the specified engine using pip/uv. This is a convenience
+    tool so the AI agent can help users set up engines without leaving the chat.
+
+    Supported engines:
+    - marker: High-quality PDF extraction (installs marker-pdf + PyTorch, ~2.5GB).
+    - ml: TATR deep-learning table detection (installs torch + transformers).
+    - all: Everything (marker + ml).
+
+    Note: Installation may take several minutes for large packages.
+    If installation fails due to filesystem issues, suggest: export UV_LINK_MODE=copy
+
+    Args:
+        engine: Engine to install ('marker', 'ml', 'all').
+
+    Returns:
+        JSON with installation result and next steps.
+    """
+    import subprocess
+    import sys
+
+    valid_extras = {"marker", "ml", "all"}
+    if engine not in valid_extras:
+        return _json(
+            {
+                "ok": False,
+                "error": (
+                    f"Unknown engine: {engine!r}. "
+                    f"Valid options: {', '.join(sorted(valid_extras))}"
+                ),
+            }
+        )
+
+    package = f"pdf-capture-mcp[{engine}]"
+
+    # Try uv pip first (faster), fallback to pip
+    install_cmds = [
+        [sys.executable, "-m", "pip", "install", package],
+    ]
+
+    # Check if uv is available
+    import shutil
+
+    uv_path = shutil.which("uv")
+    if uv_path:
+        install_cmds.insert(0, [uv_path, "pip", "install", "--python", sys.executable, package])
+
+    for cmd in install_cmds:
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,  # 10 min max
+            )
+            if result.returncode == 0:
+                # Verify installation
+                import importlib
+
+                if engine in ("marker", "all"):
+                    try:
+                        importlib.import_module("marker")
+                    except ImportError:
+                        pass  # May need restart
+
+                return _json(
+                    {
+                        "ok": True,
+                        "message": (
+                            f"Successfully installed {package}. "
+                            "The engine will be available for subsequent extraction calls. "
+                            "You may need to restart the MCP server for changes to take effect."
+                        ),
+                        "engine": engine,
+                        "output": result.stdout[-500:] if result.stdout else "",
+                    }
+                )
+            else:
+                # Try next command
+                continue
+        except subprocess.TimeoutExpired:
+            return _json(
+                {
+                    "ok": False,
+                    "error": (
+                        f"Installation timed out (>10min). The package {package} is very large. "
+                        "Try installing manually: pip install "
+                        f"{package}"
+                    ),
+                }
+            )
+        except Exception:
+            continue
+
+    return _json(
+        {
+            "ok": False,
+            "error": (
+                f"Failed to install {package}. Try manually:\n"
+                f"  pip install {package}\n"
+                "If on an external drive, first: export UV_LINK_MODE=copy"
+            ),
+        }
+    )
 
 
 # ── Tool 1: pdf_to_markdown ─────────────────────────────────────────────────
@@ -381,7 +543,21 @@ def pdf_to_markdown(
         extraction_dir = Path(out_dir) / "extraction"
         extraction_dir.mkdir(parents=True, exist_ok=True)
 
-        eng = get_engine(engine)
+        try:
+            eng = get_engine(engine)
+        except RuntimeError as engine_err:
+            return _json(
+                {
+                    "ok": False,
+                    "error": str(engine_err),
+                    "stage": "engine_select",
+                    "quick_fix": "pip install pdf-capture-mcp[marker]",
+                    "alternative": (
+                        "The built-in pymupdf engine should be available as a fallback. "
+                        "If this error persists, run: pip install pymupdf4llm"
+                    ),
+                }
+            )
         extract_report = eng.extract(
             pdf,
             extraction_dir,
