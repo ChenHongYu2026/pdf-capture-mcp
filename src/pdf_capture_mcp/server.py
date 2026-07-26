@@ -368,9 +368,7 @@ def check_environment() -> str:
         )
 
     if results["warnings"]:
-        results["message"] += "\n\nWarnings:\n" + "\n".join(
-            f"  - {w}" for w in results["warnings"]
-        )
+        results["message"] += "\n\nWarnings:\n" + "\n".join(f"  - {w}" for w in results["warnings"])
 
     return _json(results)
 
@@ -408,8 +406,7 @@ def install_engine(engine: str = "marker") -> str:
             {
                 "ok": False,
                 "error": (
-                    f"Unknown engine: {engine!r}. "
-                    f"Valid options: {', '.join(sorted(valid_extras))}"
+                    f"Unknown engine: {engine!r}. Valid options: {', '.join(sorted(valid_extras))}"
                 ),
             }
         )
