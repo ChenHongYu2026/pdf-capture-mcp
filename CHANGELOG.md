@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.3] - 2026-07-26
+
+Field report: every image in converted documents rendered as broken. Root
+cause: the marker engine saves images into an `images/` subdirectory but
+leaves bare filenames in the markdown links, so relative resolution fails.
+
+### Fixed
+
+- marker engine now rewrites image references to `images/<name>` after
+  saving files, so links resolve relative to `full_text.md`.
+
+### Added
+
+- `MD-109` (warn, auto-fix): image-link integrity check — references that
+  do not resolve from the markdown's directory are rewritten when the file
+  exists under `images/<basename>`; unresolvable references are reported.
+  `run_markdown_audit` gains an optional `base_dir` argument; the pipeline
+  passes the extraction directory automatically.
+
 ## [0.4.2] - 2026-07-26
 
 Field report: converted documents looked "formula-free" in math-enabled

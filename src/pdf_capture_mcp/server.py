@@ -780,7 +780,9 @@ def _run_pipeline(
         from pdf_capture_mcp.quality.md_audit import run_markdown_audit
         from pdf_capture_mcp.quality.qc_gate import run_qc_gate
 
-        audit = run_markdown_audit(markdown_text, pdf_path=pdf, autofix=True)
+        audit = run_markdown_audit(
+            markdown_text, pdf_path=pdf, autofix=True, base_dir=extraction_dir
+        )
         markdown_text = audit["text"]
         audit_issues = audit["issues"]
         audit_counts = audit["counts"]
@@ -800,7 +802,9 @@ def _run_pipeline(
                 markdown_text = rep["text"]
                 # Re-audit the repaired text: verified repairs clear their
                 # issues; anything left is genuinely outstanding.
-                post = run_markdown_audit(markdown_text, pdf_path=pdf, autofix=False)
+                post = run_markdown_audit(
+                    markdown_text, pdf_path=pdf, autofix=False, base_dir=extraction_dir
+                )
                 audit_issues = post["issues"]
                 audit_counts = post["counts"]
 

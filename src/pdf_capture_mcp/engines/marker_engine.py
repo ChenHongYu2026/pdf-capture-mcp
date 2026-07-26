@@ -124,6 +124,18 @@ class MarkerEngine:
                     if hasattr(img_data, "save"):
                         img_data.save(str(img_path))
 
+            # Fix image references: marker emits bare filenames (e.g.
+            # `![](_page_2_Figure_0.jpeg)`) but we save images into an
+            # `images/` subdirectory, so links must include the prefix.
+            if images:
+                for img_name in images:
+                    bare_ref = f"]({img_name})"
+                    fixed_ref = f"](images/{img_name})"
+                    if bare_ref in text:
+                        text = text.replace(bare_ref, fixed_ref)
+                # Re-write the md with fixed paths
+                md_path.write_text(text, encoding="utf-8")
+
             elapsed = round(time.time() - t0, 2)
 
             # Count pages from metadata
