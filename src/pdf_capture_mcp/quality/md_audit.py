@@ -105,6 +105,16 @@ def _is_separator_row(row: str) -> bool:
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 _SPAN_PLACEHOLDER = "<span></span>"
 
+# MD-108: escaped brackets inside citation-anchor links. Engines emit
+# references as ``[\[MCCD13,](#page-71-0)`` / ``[PSM14\]](#page-72-0)``.
+# Valid CommonMark — but math-enabled renderers (MathJax/KaTeX) treat
+# ``\[`` as a display-math opener; the anchor's ``#`` then explodes with
+# "You can't use macro parameter character # in math mode", wrecking math
+# rendering document-wide. Only the two link-scoped shapes are rewritten,
+# so genuine display math (``\[x^2\]``) is never touched.
+_ESC_OPEN_IN_LINK = re.compile(r"\[\\\[")  # literal '[\[' -> '[['
+_ESC_CLOSE_IN_LINK = re.compile(r"\\\]\]\(")  # literal '\]](' -> ']]('
+
 
 def sanitize_markdown(text: str) -> tuple[str, list[AuditIssue]]:
     """Apply deterministic, information-preserving fixes.
@@ -115,6 +125,8 @@ def sanitize_markdown(text: str) -> tuple[str, list[AuditIssue]]:
       rejoins the word.
     - MD-106: drop empty ``<span></span>`` placeholder cells emitted for
       blank header cells.
+    - MD-108: de-escape citation-link brackets that collide with math
+      delimiters in MathJax/KaTeX renderers (link-scoped shapes only).
 
     Returns:
         (sanitized_text, fixes) — fixes describe what was changed and where.
@@ -147,6 +159,30 @@ def sanitize_markdown(text: str) -> tuple[str, list[AuditIssue]]:
                 "empty <span></span> placeholder cell(s).",
                 lines=span_lines,
                 suggestion="Fixed automatically; cells left blank.",
+            )
+        )
+
+    n_open = len(_ESC_OPEN_IN_LINK.findall(text))
+    n_close = len(_ESC_CLOSE_IN_LINK.findall(text))
+    if n_open or n_close:
+        esc_lines = [
+            i
+            for i, line in enumerate(lines, 1)
+            if _ESC_OPEN_IN_LINK.search(line) or _ESC_CLOSE_IN_LINK.search(line)
+        ]
+        text = _ESC_OPEN_IN_LINK.sub("[[", text)
+        text = _ESC_CLOSE_IN_LINK.sub("]](", text)
+        fixes.append(
+            AuditIssue(
+                rule="MD-108",
+                severity=SEVERITY_WARN,
+                message=f"De-escaped {n_open + n_close} citation-link bracket(s) "
+                "('[\\[' / '\\]](') that math-enabled renderers misread as "
+                "display-math delimiters, breaking formula rendering with "
+                "'macro parameter character #' errors.",
+                lines=esc_lines[:20],
+                suggestion="Fixed automatically; rendering equivalence preserved "
+                "(brackets still display literally in CommonMark).",
             )
         )
 
@@ -313,6 +349,32 @@ def _detect_flattened_group_header(blocks: list[list[tuple[int, str]]]) -> list[
     return issues
 
 
+def _detect_math_delimiter_collision(lines: list[str]) -> list[AuditIssue]:
+    """MD-108 (residual): escaped brackets co-located with anchor links.
+
+    Catches shapes the link-scoped sanitizer does not rewrite — any remaining
+    ``\\[``/``\\]`` on a line that also carries a ``](#`` anchor link will
+    still break math-enabled renderers.
+    """
+    hits = [
+        i for i, line in enumerate(lines, 1) if ("\\[" in line or "\\]" in line) and "](#" in line
+    ]
+    if not hits:
+        return []
+    return [
+        AuditIssue(
+            rule="MD-108",
+            severity=SEVERITY_WARN,
+            message=f"{len(hits)} line(s) still mix escaped brackets with anchor "
+            "links — math-enabled renderers may misread them as display-math "
+            "delimiters.",
+            lines=hits[:20],
+            suggestion="Review these lines; consider replacing '\\[' / '\\]' with "
+            "plain brackets if they are not genuine display math.",
+        )
+    ]
+
+
 def audit_markdown(text: str) -> list[AuditIssue]:
     """Run all content-aware detectors against converted markdown."""
     lines = text.splitlines()
@@ -323,6 +385,7 @@ def audit_markdown(text: str) -> list[AuditIssue]:
     issues += _detect_numeric_tearing(blocks)
     issues += _detect_header_fusion(blocks)
     issues += _detect_flattened_group_header(blocks)
+    issues += _detect_math_delimiter_collision(lines)
     return issues
 
 

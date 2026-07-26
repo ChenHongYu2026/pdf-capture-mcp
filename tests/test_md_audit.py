@@ -309,3 +309,45 @@ def test_single_letter_formula_not_broken():
     # Genuinely broken content still fails.
     assert _assess_formula_integrity("broken $?$ formula") == 0.0
     assert _assess_formula_integrity("broken $a???b$ formula") == 0.0
+
+
+# ── v0.4.2: MD-108 math-delimiter collision ──────────────────────────
+
+
+def test_md108_citation_links_deescaped():
+    # Real marker citation shapes from two audited papers.
+    text = (
+        "word vectors [\\[MCCD13,](#page-71-0) [PSM14\\]](#page-72-0) and "
+        "models [\\[VSP](#page-73-0)<sup>+</sup>17] here [\\[39\\]](#page-13-7)."
+    )
+    fixed, fixes = sanitize_markdown(text)
+    md108 = [f for f in fixes if f.rule == "MD-108"]
+    assert len(md108) == 1
+    assert "\\[" not in fixed and "\\]](" not in fixed
+    # Link structure survives: anchors still resolve.
+    assert "[[MCCD13,](#page-71-0)" in fixed
+    assert "[PSM14]](#page-72-0)" in fixed
+    assert "[[39]](#page-13-7)" in fixed
+
+
+def test_md108_genuine_display_math_untouched():
+    # Standalone \[ ... \] display math is NOT a link shape - must survive.
+    text = "Consider the equation\n\\[ x^2 + y^2 = z^2 \\]\nas shown above."
+    fixed, fixes = sanitize_markdown(text)
+    assert fixed == text
+    assert not any(f.rule == "MD-108" for f in fixes)
+
+
+def test_md108_residual_detection():
+    # A shape the sanitizer does not rewrite, co-located with an anchor link.
+    text = "weird \\[orphan escape with [link](#page-1-0) on the same line"
+    issues = audit_markdown(text)
+    hits = [i for i in issues if i.rule == "MD-108"]
+    assert len(hits) == 1
+    assert hits[0].severity == "warn"
+
+
+def test_md108_plain_links_not_flagged():
+    text = "normal [citation](#page-1-0) link without escapes"
+    issues = audit_markdown(text)
+    assert not any(i.rule == "MD-108" for i in issues)
