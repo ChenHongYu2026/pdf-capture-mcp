@@ -1244,6 +1244,131 @@ def export_to_obsidian(package_dir: str, vault_path: str, category: str = "") ->
 
 
 @mcp.tool()
+def setup_embedding(
+    model: str = "",
+    api_key: str = "",
+    api_base: str = "https://api.openai.com/v1",
+    provider: str = "openai",
+    action: str = "status",
+) -> str:
+    """Configure the embedding endpoint that powers RAG indexing/search.
+
+    Any OpenAI-compatible /embeddings endpoint works: OpenAI, MiniMax
+    (embo-01), SiliconFlow/BGE, or a local Ollama /v1 shim for fully-
+    offline setups. Validation performs one real call and records the
+    vector dimensionality (required at collection creation).
+
+    Actions:
+    - status: current configuration (never exposes the key).
+    - enable: validate and persist (model + api_key required; api_key may
+      also come from the PDF_CAPTURE_EMBEDDING_API_KEY env var).
+    - disable: turn embedding features off.
+
+    Returns:
+        JSON with ok, message, dimensions.
+    """
+    try:
+        from pdf_capture_mcp import embedding_client as emb
+
+        if action == "status":
+            return _json({"ok": True, **emb.get_embedding_info()})
+        if action == "disable":
+            return _json(emb.disable_embedding())
+        if action != "enable":
+            return _json(
+                {"ok": False, "error": f"Invalid action: {action!r}. Use: status, enable, disable"}
+            )
+        resolved = api_key.strip() or os.getenv("PDF_CAPTURE_EMBEDDING_API_KEY", "").strip()
+        if not resolved:
+            return _json(
+                {
+                    "ok": False,
+                    "error": "api_key required (or set PDF_CAPTURE_EMBEDDING_API_KEY).",
+                }
+            )
+        result = emb.setup_embedding(
+            model=model, api_key=resolved, api_base=api_base, provider=provider
+        )
+        result.pop("api_key", None)
+        return _json(result)
+    except Exception as exc:  # noqa: BLE001 — tool boundary
+        logger.error("setup_embedding failed: %s", traceback.format_exc())
+        return _json({"ok": False, "error": str(exc)})
+
+
+@mcp.tool()
+def build_vector_index(package_dir: str) -> str:
+    """Index a knowledge package into the Qdrant vector store (incremental).
+
+    Embedded Qdrant runs locally with zero services (file-persisted under
+    <output_root>/vector_store); set PDF_CAPTURE_QDRANT_URL to use a
+    Docker/cluster deployment with the same API. Content-addressed chunk
+    ids make re-indexing incremental: unchanged chunks cost nothing, only
+    new/changed chunks are embedded, vanished chunks are deleted.
+
+    Refuses to index a stale package (main markdown edited after chunking
+    — content_hash mismatch) instead of silently indexing drifted data.
+
+    Args:
+        package_dir: Path to a knowledge package (contains data/metadata.json).
+
+    Returns:
+        JSON with ok, embedded/unchanged/deleted counts, store location.
+    """
+    try:
+        from pdf_capture_mcp.rag_store import build_vector_index as do_build
+
+        return _json(do_build(package_dir))
+    except Exception as exc:  # noqa: BLE001 — tool boundary
+        logger.error("build_vector_index failed: %s", traceback.format_exc())
+        return _json({"ok": False, "error": str(exc)})
+
+
+@mcp.tool()
+def search_corpus(
+    query: str,
+    top_k: int = 5,
+    doc_id: str = "",
+    chunk_type: str = "",
+    page_from: int = 0,
+    page_to: int = 0,
+) -> str:
+    """Semantic search across all indexed knowledge packages.
+
+    This tool IS the RAG API: dense vector similarity plus metadata
+    filters, returning content with heading_path and page for citation.
+
+    Args:
+        query: Natural-language query (embedded with the configured model).
+        top_k: Number of results (1-50).
+        doc_id: Restrict to one document (from metadata.json / previous hits).
+        chunk_type: Restrict to 'text' | 'table' | 'figure' | 'code'.
+        page_from: Minimum page number (1-based, 0 = no bound).
+        page_to: Maximum page number (0 = no bound).
+
+    Returns:
+        JSON with hits: [{score, title, heading_path, page, chunk_type,
+        content, doc_id, chunk_id}].
+    """
+    try:
+        from pdf_capture_mcp.rag_store import search_corpus as do_search
+
+        return _json(
+            do_search(
+                query,
+                top_k=top_k,
+                doc_id=doc_id,
+                chunk_type=chunk_type,
+                page_from=page_from,
+                page_to=page_to,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001 — tool boundary
+        logger.error("search_corpus failed: %s", traceback.format_exc())
+        return _json({"ok": False, "error": str(exc)})
+
+
+@mcp.tool()
 def get_job_status(job_id: str = "") -> str:
     """Get the status of a background job, or list recent jobs.
 
