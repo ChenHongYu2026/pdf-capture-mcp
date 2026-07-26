@@ -713,6 +713,7 @@ def _run_pipeline(
     out_dir: str = "",
     auto_repair: bool = True,
     enrich_figures: str | bool = "auto",
+    package: bool = True,
     pages: list[int] | None = None,
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -928,10 +929,105 @@ def _run_pipeline(
     elif not markdown_text:
         qc_verdict = "HALT"
 
+    # Phase 5: knowledge package assembly — self-describing folder that any
+    # agent can read (README map) and that drops into an Obsidian vault as a
+    # unit. MD-110 cross-page table merge runs first so chunks see the
+    # merged tables; frontmatter is injected LAST (N3: QC sees body only).
+    package_info: dict[str, Any] = {}
+    if package and markdown_text and qc_verdict != "HALT":
+        _stage("package")
+        try:
+            from pdf_capture_mcp import __version__ as _ver
+            from pdf_capture_mcp.chunking.chunker import chunk_markdown
+            from pdf_capture_mcp.packaging import (
+                assemble_package,
+                build_frontmatter,
+                build_heading_tree,
+                compute_doc_id,
+                extract_summary,
+            )
+            from pdf_capture_mcp.quality.cross_page_tables import (
+                detect_cross_page_tables,
+                merge_cross_page_tables,
+            )
+
+            # MD-110: merge split cross-page tables (geometric gate inside)
+            md110 = detect_cross_page_tables(markdown_text, pdf_path=pdf)
+            if md110:
+                md_lines = markdown_text.splitlines()
+                merge_actions = []
+                # Merge bottom-up so earlier line numbers stay valid
+                for issue in sorted(md110, key=lambda i: -i.lines[0]):
+                    merge_actions.append(merge_cross_page_tables(md_lines, issue))
+                merged_text = "\n".join(md_lines) + ("\n" if markdown_text.endswith("\n") else "")
+                if merged_text != markdown_text:
+                    markdown_text = merged_text
+                    md_path.write_text(markdown_text, encoding="utf-8")
+                if qc_report:
+                    qc_report.setdefault("repairs", []).extend(vars(a) for a in merge_actions)
+
+            doc_id = compute_doc_id(pdf)
+            title = pdf.stem
+            chunk_result = chunk_markdown(markdown_text, doc_id, pdf_path=pdf)
+            summary, summary_source = extract_summary(markdown_text)
+            frontmatter = build_frontmatter(
+                title=title,
+                doc_id=doc_id,
+                source_pdf=pdf.name,
+                pages=extract_report.page_count,
+                qc_verdict=qc_verdict,
+                tool_version=_ver,
+            )
+            conversion_params = {
+                "engine": eng.name,
+                "enable_formula": enable_formula,
+                "table_enrich": table_enrich_on,
+                "enrich_figures": figures_on,
+                "auto_repair": auto_repair,
+            }
+            package_info = assemble_package(
+                output_root=Path(out_dir),
+                title=title,
+                doc_id=doc_id,
+                markdown_text=markdown_text,
+                frontmatter=frontmatter,
+                images_dir=extraction_dir / "images",
+                tables=table_result.get("tables", []),
+                chunks=chunk_result["chunks"],
+                qc_report=qc_report,
+                readme_kwargs={
+                    "title": title,
+                    "doc_id": doc_id,
+                    "source_pdf": pdf.name,
+                    "pages": extract_report.page_count,
+                    "qc_verdict": qc_verdict,
+                    "tool_version": _ver,
+                    "summary": summary,
+                    "summary_source": summary_source,
+                },
+                metadata_kwargs={
+                    "doc_id": doc_id,
+                    "title": title,
+                    "source_pdf": pdf.name,
+                    "pages": extract_report.page_count,
+                    "tool_version": _ver,
+                    "conversion_params": conversion_params,
+                    "summary": summary,
+                    "summary_source": summary_source,
+                    "heading_tree": build_heading_tree(markdown_text),
+                    "dropped_headers": chunk_result["dropped_headers"],
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — packaging must not kill conversion
+            logger.warning("Package assembly failed: %s", exc)
+            package_info = {"error": f"Package assembly failed: {exc}"}
+
     return {
         "ok": qc_verdict != "HALT",
         "markdown_text": markdown_text,
-        "markdown_path": str(md_path) if md_path.exists() else "",
+        "markdown_path": package_info.get("markdown_path")
+        or (str(md_path) if md_path.exists() else ""),
+        "package": package_info,
         "pipeline_root": str(out_dir),
         "title": pdf.stem,
         "engine": eng.name,
@@ -966,11 +1062,25 @@ def pdf_to_markdown(
     page_range: str = "",
     auto_repair: bool = True,
     enrich_figures: str = "auto",
+    package: bool = True,
 ) -> str:
-    """Convert a PDF document to high-quality structured Markdown.
+    """Convert a PDF into a self-describing Markdown knowledge package.
 
     Pipeline: Engine extraction (marker/MinerU) -> table extraction (pdfplumber)
-    -> layout cleaning -> QC quality gate -> output Markdown.
+    -> layout cleaning -> QC quality gate -> repair -> knowledge package.
+
+    Output (package=True, default) is a self-describing folder that drops
+    into an Obsidian vault as a unit and that any LLM agent can understand
+    from its README.md alone:
+
+        <out_dir>/<slug>/
+            <slug>.md        main document (frontmatter included)
+            README.md        agent + human entry map
+            images/, tables/ assets (relative refs)
+            data/            chunks.jsonl + metadata.json + qc_report.json
+
+    When out_dir is empty the package goes to $PDF_CAPTURE_OUTPUT_ROOT or
+    ~/Documents/pdf-capture (stable location — not a temp dir).
 
     Large-PDF handling: conversion of big documents can exceed MCP client
     timeouts. In mode='auto' (default), PDFs above ~15 pages are converted in
@@ -1011,6 +1121,9 @@ def pdf_to_markdown(
             content becomes retrievable by text-only RAG (closes the MD-202
             gap). 'auto' = on when a VLM is configured with policy='full'.
             Consumes API tokens per figure.
+        package: Assemble the knowledge package (chunks.jsonl, README,
+            metadata, frontmatter, MD-110 cross-page table merge). Set
+            False for the bare markdown-only layout of earlier versions.
 
     Returns:
         JSON with markdown_text (sync) or job_id + polling hint (async).
@@ -1030,7 +1143,15 @@ def pdf_to_markdown(
             )
 
         if not out_dir.strip():
-            out_dir = tempfile.mkdtemp(prefix="pdf_capture_")
+            if package:
+                # Stable, discoverable default — knowledge packages are
+                # assets, not scratch files (naming-standard audit).
+                out_dir = os.environ.get(
+                    "PDF_CAPTURE_OUTPUT_ROOT",
+                    str(Path.home() / "Documents" / "pdf-capture"),
+                )
+            else:
+                out_dir = tempfile.mkdtemp(prefix="pdf_capture_")
 
         effective_pages = len(pages) if pages is not None else _quick_page_count(pdf)
         run_async = mode == "async" or (mode == "auto" and effective_pages > ASYNC_PAGE_THRESHOLD)
@@ -1043,6 +1164,7 @@ def pdf_to_markdown(
             "out_dir": out_dir,
             "auto_repair": auto_repair,
             "enrich_figures": enrich_figures,
+            "package": package,
             "pages": pages,
         }
 
@@ -1091,6 +1213,34 @@ def pdf_to_markdown(
                 "traceback": traceback.format_exc()[-500:],
             }
         )
+
+
+@mcp.tool()
+def export_to_obsidian(package_dir: str, vault_path: str, category: str = "") -> str:
+    """Copy a knowledge package into an Obsidian vault as a whole unit.
+
+    The package folder produced by pdf_to_markdown is vault-ready: main md
+    carries frontmatter, image refs are relative, README.md doubles as the
+    document card. This tool copies the ENTIRE folder (never flattens,
+    never rewrites links) into the vault, optionally under a category
+    subfolder. Idempotent: skips when the vault already holds an identical
+    content_hash.
+
+    Args:
+        package_dir: Path to the knowledge package (contains data/metadata.json).
+        vault_path: Absolute path to the Obsidian vault root.
+        category: Optional subfolder inside the vault (e.g. 'Papers/LLM').
+
+    Returns:
+        JSON with ok, dest, skipped.
+    """
+    try:
+        from pdf_capture_mcp.packaging import export_package_to_vault
+
+        return _json(export_package_to_vault(package_dir, vault_path, category))
+    except Exception as exc:  # noqa: BLE001 — tool boundary
+        logger.error("export_to_obsidian failed: %s", traceback.format_exc())
+        return _json({"ok": False, "error": str(exc)})
 
 
 @mcp.tool()

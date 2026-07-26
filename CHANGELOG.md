@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-07-27
+
+Knowledge packages: from "conversion output" to a self-describing knowledge
+asset — readable by any LLM agent from one README, vault-ready for Obsidian,
+and chunked for RAG. The design went through TWO audit rounds (13 severe +
+11 medium findings) before a line of code was written; every fix below
+references its audit finding.
+
+### Added
+
+- **`chunking/chunker.py`** — hierarchical chunker:
+  - Heading-path chunks with same-named-sibling disambiguation (N11);
+    tables/code as dedicated chunks; oversized tables split by row groups
+    with the header repeated per part + part_n/total metadata (S1).
+  - `content` vs `embed_text` field separation (N2): context (caption,
+    heading path) enriches embeddings (S2) without affecting chunk ids.
+  - Content-addressed `chunk_id` = sha1(doc_id | heading_path | dup_index
+    | content) — position-independent (S6), collision-free for repeated
+    blocks (N1).
+  - Bare figure links fold into surrounding text; only VLM-described
+    figures become chunks (N6).
+  - Zero-dependency token estimation — CJK-aware, HTML tags stripped for
+    tables (S7/M1/N8); no tiktoken CDN dependency.
+  - Monotonic page anchoring against the PDF text layer (S4); scanned
+    PDFs report page=null honestly (M4); running headers dropped and
+    reported (N12).
+- **`packaging.py`** — self-describing knowledge package:
+  - Layout: `<slug>/<slug>.md` (Obsidian [[slug]] direct hit) + README.md
+    (agent entry map with file table + chunks schema) + images/ + tables/
+    (page-stamped CSVs, N9) + data/ (chunks.jsonl, metadata.json,
+    qc_report.json — now archived on disk).
+  - Naming standard: doc_id = sha256(pdf)[:16] content identity; NFC slug,
+    fullwidth-char cleanup, ≤60 chars, hash suffix only on collision
+    (M3/N10); timestamps never in file names (idempotent re-runs).
+  - Frontmatter injected LAST, after all QC phases (N3); metadata carries
+    content_hash so a future vector indexer can detect hand-edited
+    markdown before indexing stale chunks (N4).
+  - Honest summary chain: abstract -> first substantial paragraph ->
+    explicit "unavailable" (N7), source recorded.
+- **MD-110** (`quality/cross_page_tables.py`): cross-page table merge
+  behind a geometric three-evidence gate — previous table touches page
+  bottom AND next table touches page top AND no caption between (S3).
+  Same-column but separate tables are reported, never merged. Continuation
+  detection tolerates heading-only gaps (M2).
+- **`export_to_obsidian` tool**: copies the whole package into a vault
+  (optional category), idempotent by content_hash. Never flattens, never
+  rewrites links — the folder is the namespace (N5 superseded audit fix
+  S5's asset relocation).
+- `pdf_to_markdown` gains `package: bool = True`; default output root is
+  now `$PDF_CAPTURE_OUTPUT_ROOT` or `~/Documents/pdf-capture` instead of a
+  temp dir when packaging.
+- `AuditIssue` gains a structured `evidence` field (consumed by MD-110).
+
 ## [0.6.0] - 2026-07-26
 
 Feature-activation redesign: deep capabilities no longer sleep silently.
