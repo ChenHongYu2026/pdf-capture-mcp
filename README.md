@@ -164,7 +164,9 @@ results are returned in `qc_report` (verdict, dimension scores, issues, fixes):
 | `MD-104` | Numeric column tearing — scientific notation split across cells (`6 \| 0 \| × 10 \| − 4`, decimal point lost) | critical | — |
 | `MD-105` | Table header fused with the first data row (header cells contain standalone numbers) | critical | — |
 | `MD-106` | Empty `<span></span>` placeholder cells | info | ✅ removed |
-| `MD-201` | Content loss — token-multiset comparison against the PDF text layer (pymupdf, independent of the engine's layout analysis); missing-token examples included | info/warn/critical by ratio | — |
+| `MD-107` | Flattened multi-row group headers (group labels glued onto repeated metric names in wide tables) | warn | — |
+| `MD-201` | Body content loss — hyphenation-normalized token comparison against the PDF text layer (pymupdf, independent of the engine's layout analysis); figure text excluded | info/warn/critical by ratio | — |
+| `MD-202` | Figure-text omission — text embedded in vector figures never reaches the markdown body (expected; enable VLM enrichment to transcribe) | info | — |
 
 **Auto-fix policy**: only deterministic, information-preserving fixes are
 applied automatically (the sanitized markdown is written back to
@@ -423,7 +425,9 @@ marker 引擎首次使用时会在 **300 秒启动窗口内**下载约 2GB 模�
 | `MD-104` | 数值列撕裂 —— 科学计数法被拆进多个单元格（`6 \| 0 \| × 10 \| − 4`，小数点丢失） | critical | — |
 | `MD-105` | 表头与首行数据融合（表头单元格含独立数字） | critical | — |
 | `MD-106` | 空 `<span></span>` 占位单元格 | info | ✅ 移除 |
-| `MD-201` | 内容丢失 —— 与 PDF 文本层（pymupdf，独立于引擎版面分析的通道）做 token 多重集比对，附缺失 token 样例 | 按比例 info/warn/critical | — |
+| `MD-107` | 多行分组表头被压平（宽表中分组名错接到重复的指标名上） | warn | — |
+| `MD-201` | 正文内容丢失 —— 与 PDF 文本层（pymupdf，独立于引擎版面分析的通道）做**去连字符归一化**的 token 比对，图内文字已排除 | 按比例 info/warn/critical | — |
+| `MD-202` | 图内文字省略 —— 矢量图内嵌入的文字不会进入正文（预期行为；需要时可开 VLM 增强转录） | info | — |
 
 **自动修复策略**：仅自动应用确定性、信息无损的修复（修复后的 markdown 会回写
 `full_text.md`）。
