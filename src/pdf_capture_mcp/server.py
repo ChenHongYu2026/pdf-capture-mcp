@@ -711,6 +711,58 @@ def _quick_page_count(pdf: Path) -> int:
 
 SEGMENT_PAGE_THRESHOLD = 100
 SEGMENT_WINDOW = 80
+SEGMENT_TIMEOUT_S = 1200  # 20 min per 80-page window — generous yet bounded
+
+
+def _segment_child(
+    engine_name: str, pdf_str: str, seg_dir_str: str, kwargs: dict[str, Any], queue: Any
+) -> None:
+    """Subprocess entry for one segment (module-level for spawn)."""
+    try:
+        from pdf_capture_mcp.engines import get_engine
+
+        eng = get_engine(engine_name)
+        queue.put(eng.extract(Path(pdf_str), Path(seg_dir_str), **kwargs))
+    except Exception as exc:  # noqa: BLE001 — child must always report
+        from pdf_capture_mcp.types import ExtractReport
+
+        queue.put(ExtractReport(ok=False, engine=engine_name, error=str(exc)[:300]))
+
+
+def _run_segment_isolated(
+    eng: Any, pdf: Path, seg_dir: Path, kwargs: dict[str, Any], timeout_s: float
+) -> Any:
+    """Run one segment extraction in a subprocess with a hard timeout.
+
+    Returns the ExtractReport, or None on timeout (245-page regression:
+    a single ultra-dense page can wedge the OCR service mid-segment —
+    marker then retries internally forever and never returns, so failure
+    can only be enforced from outside). daemon=False: marker spawns its
+    own workers and daemonic processes may not have children.
+    """
+    import multiprocessing as mp
+    import queue as queue_mod
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    proc = ctx.Process(
+        target=_segment_child,
+        args=(eng.name, str(pdf), str(seg_dir), kwargs, q),
+        daemon=False,
+    )
+    proc.start()
+    try:
+        report = q.get(timeout=timeout_s)
+        proc.join(30)
+        return report
+    except queue_mod.Empty:
+        proc.terminate()
+        proc.join(10)
+        if proc.is_alive():
+            proc.kill()
+        return None
+    finally:
+        q.close()
 
 
 def _extract_segmented(
@@ -721,13 +773,20 @@ def _extract_segmented(
     *,
     enable_formula: bool,
     stage_cb: Any,
+    segment_timeout_s: float = SEGMENT_TIMEOUT_S,
+    _runner: Any = None,
+    _fallback: Any = None,
 ) -> Any:
     """Extract an oversized PDF in page windows and merge the segments.
 
-    Per segment: own subdir -> md appended, images renamed with an 's<k>_'
-    prefix (page numbering may restart per range, so bare names would
-    collide across segments) and references rewritten. A failed segment
-    gets one retry after an inference-service restart (contagion hygiene).
+    Per segment: subprocess with a hard timeout (v0.9.4) -> on timeout or
+    failure, restart inference services and retry once -> still failing,
+    DEGRADE HONESTLY to the pymupdf text-layer engine for that segment
+    (content preserved in seconds, layout fidelity reduced) and record it
+    in metadata['degraded_segments']. A whole document never dies because
+    of one ultra-dense page anymore.
+
+    _runner/_fallback are injectable for tests.
     """
     import math
     import shutil
@@ -735,10 +794,12 @@ def _extract_segmented(
     from pdf_capture_mcp.engines.marker_engine import restart_inference_services
     from pdf_capture_mcp.types import ExtractReport
 
+    runner = _runner or _run_segment_isolated
     images_dir = extraction_dir / "images"
     images_dir.mkdir(parents=True, exist_ok=True)
     n_seg = math.ceil(total_pages / SEGMENT_WINDOW)
     md_parts: list[str] = []
+    degraded: list[int] = []
     image_count, elapsed = 0, 0.0
 
     for k, seg_start in enumerate(range(0, total_pages, SEGMENT_WINDOW)):
@@ -746,24 +807,42 @@ def _extract_segmented(
         stage_cb(f"extracting segment {k + 1}/{n_seg} (pages {seg_start + 1}-{seg_end + 1})")
         seg_dir = extraction_dir / f"seg_{k}"
         seg_kwargs = {
+            "enable_formula": enable_formula,
+            "enable_table": True,
             "pages": list(range(seg_start, seg_end + 1)),
             "page_range": f"{seg_start}-{seg_end}",
         }
-        report = eng.extract(
-            pdf, seg_dir, enable_formula=enable_formula, enable_table=True, **seg_kwargs
-        )
-        if not report.ok:
-            # Service hygiene: restart inference services, retry once.
+        report = runner(eng, pdf, seg_dir, seg_kwargs, segment_timeout_s)
+        if report is None or not report.ok:
+            # Service hygiene, then one retry inside a fresh subprocess.
             restart_inference_services()
-            report = eng.extract(
-                pdf, seg_dir, enable_formula=enable_formula, enable_table=True, **seg_kwargs
+            shutil.rmtree(seg_dir, ignore_errors=True)
+            report = runner(eng, pdf, seg_dir, seg_kwargs, segment_timeout_s)
+        if report is None or not report.ok:
+            # Honest degradation: the text layer is always reachable.
+            stage_cb(f"segment {k + 1}/{n_seg}: degrading to text-layer engine")
+            restart_inference_services()
+            shutil.rmtree(seg_dir, ignore_errors=True)
+            if _fallback is not None:
+                fallback_eng = _fallback
+            else:
+                from pdf_capture_mcp.engines import get_engine
+
+                fallback_eng = get_engine("pymupdf")
+            report = fallback_eng.extract(
+                pdf,
+                seg_dir,
+                enable_formula=False,
+                enable_table=True,
+                pages=list(range(seg_start, seg_end + 1)),
             )
             if not report.ok:
                 report.error = (
                     f"Segment {k + 1}/{n_seg} (pages {seg_start + 1}-{seg_end + 1}) "
-                    f"failed after service restart: {report.error}"
+                    f"failed even in degraded mode: {report.error}"
                 )
                 return report
+            degraded.append(k + 1)
 
         text = Path(report.full_text_md).read_text(encoding="utf-8", errors="replace")
         seg_images = seg_dir / "images"
@@ -779,7 +858,12 @@ def _extract_segmented(
 
     md_path = extraction_dir / "full_text.md"
     md_path.write_text("\n\n".join(md_parts) + "\n", encoding="utf-8")
-    logger.info("Segmented extraction merged: %d segments, %d pages", n_seg, total_pages)
+    logger.info(
+        "Segmented extraction merged: %d segments, %d pages, %d degraded",
+        n_seg,
+        total_pages,
+        len(degraded),
+    )
     return ExtractReport(
         ok=True,
         engine=eng.name,
@@ -788,7 +872,11 @@ def _extract_segmented(
         page_count=total_pages,
         image_count=image_count,
         elapsed_seconds=round(elapsed, 2),
-        metadata={"segments": n_seg, "segment_window": SEGMENT_WINDOW},
+        metadata={
+            "segments": n_seg,
+            "segment_window": SEGMENT_WINDOW,
+            "degraded_segments": degraded,
+        },
     )
 
 
@@ -1017,10 +1105,18 @@ def _run_pipeline(
         if qc_verdict == "PASS" and audit_counts["critical"] > 0:
             qc_verdict = "WARN"
 
+        # Degraded segments (v0.9.4): part of the document was extracted by
+        # the text-layer fallback — content preserved, layout fidelity
+        # reduced. Never let that pass silently.
+        degraded_segments = extract_report.metadata.get("degraded_segments") or []
+        if degraded_segments and qc_verdict == "PASS":
+            qc_verdict = "WARN"
+
         qc_report = {
             "verdict": qc_verdict,
             "dimensions": gate.dimensions,
             "audit_counts": audit_counts,
+            "degraded_segments": degraded_segments,
             # Plain dicts so both MCP JSON responses and persisted job state
             # serialize cleanly.
             "audit_fixes": [vars(f) for f in audit["fixes"]],
@@ -1506,7 +1602,10 @@ def _run_pipeline_isolated(
 
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
-    proc = ctx.Process(target=target, args=(str(pdf), kwargs, q), daemon=True)
+    # daemon=False: this child runs marker, which spawns its own worker
+    # processes — daemonic processes may not have children (v0.9.4 fix for
+    # segmented extraction nested inside the batch per-file isolation).
+    proc = ctx.Process(target=target, args=(str(pdf), kwargs, q), daemon=False)
     proc.start()
     try:
         result: dict[str, Any] = q.get(timeout=timeout_s)
