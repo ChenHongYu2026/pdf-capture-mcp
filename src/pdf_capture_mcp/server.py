@@ -703,6 +703,95 @@ def _quick_page_count(pdf: Path) -> int:
         return 0
 
 
+# ── Segmented extraction for oversized documents (v0.9.3) ─────────────────
+# Pilot forensics: a 245-page PDF overloaded the resident inference service
+# (13 consecutive timeouts, no self-recovery) and the backlog then poisoned
+# every subsequent document. Splitting extraction into windows keeps each
+# inference batch inside the service's safe zone.
+
+SEGMENT_PAGE_THRESHOLD = 100
+SEGMENT_WINDOW = 80
+
+
+def _extract_segmented(
+    eng: Any,
+    pdf: Path,
+    extraction_dir: Path,
+    total_pages: int,
+    *,
+    enable_formula: bool,
+    stage_cb: Any,
+) -> Any:
+    """Extract an oversized PDF in page windows and merge the segments.
+
+    Per segment: own subdir -> md appended, images renamed with an 's<k>_'
+    prefix (page numbering may restart per range, so bare names would
+    collide across segments) and references rewritten. A failed segment
+    gets one retry after an inference-service restart (contagion hygiene).
+    """
+    import math
+    import shutil
+
+    from pdf_capture_mcp.engines.marker_engine import restart_inference_services
+    from pdf_capture_mcp.types import ExtractReport
+
+    images_dir = extraction_dir / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    n_seg = math.ceil(total_pages / SEGMENT_WINDOW)
+    md_parts: list[str] = []
+    image_count, elapsed = 0, 0.0
+
+    for k, seg_start in enumerate(range(0, total_pages, SEGMENT_WINDOW)):
+        seg_end = min(seg_start + SEGMENT_WINDOW, total_pages) - 1
+        stage_cb(f"extracting segment {k + 1}/{n_seg} (pages {seg_start + 1}-{seg_end + 1})")
+        seg_dir = extraction_dir / f"seg_{k}"
+        seg_kwargs = {
+            "pages": list(range(seg_start, seg_end + 1)),
+            "page_range": f"{seg_start}-{seg_end}",
+        }
+        report = eng.extract(
+            pdf, seg_dir, enable_formula=enable_formula, enable_table=True, **seg_kwargs
+        )
+        if not report.ok:
+            # Service hygiene: restart inference services, retry once.
+            restart_inference_services()
+            report = eng.extract(
+                pdf, seg_dir, enable_formula=enable_formula, enable_table=True, **seg_kwargs
+            )
+            if not report.ok:
+                report.error = (
+                    f"Segment {k + 1}/{n_seg} (pages {seg_start + 1}-{seg_end + 1}) "
+                    f"failed after service restart: {report.error}"
+                )
+                return report
+
+        text = Path(report.full_text_md).read_text(encoding="utf-8", errors="replace")
+        seg_images = seg_dir / "images"
+        if seg_images.is_dir():
+            for img in sorted(seg_images.iterdir()):
+                new_name = f"s{k}_{img.name}"
+                shutil.move(str(img), str(images_dir / new_name))
+                text = text.replace(f"images/{img.name}", f"images/{new_name}")
+        md_parts.append(text.strip())
+        image_count += report.image_count
+        elapsed += report.elapsed_seconds
+        shutil.rmtree(seg_dir, ignore_errors=True)
+
+    md_path = extraction_dir / "full_text.md"
+    md_path.write_text("\n\n".join(md_parts) + "\n", encoding="utf-8")
+    logger.info("Segmented extraction merged: %d segments, %d pages", n_seg, total_pages)
+    return ExtractReport(
+        ok=True,
+        engine=eng.name,
+        full_text_md=str(md_path),
+        content_dir=str(extraction_dir),
+        page_count=total_pages,
+        image_count=image_count,
+        elapsed_seconds=round(elapsed, 2),
+        metadata={"segments": n_seg, "segment_window": SEGMENT_WINDOW},
+    )
+
+
 def _run_pipeline(
     pdf: Path,
     *,
@@ -798,18 +887,30 @@ def _run_pipeline(
         }
 
     _stage("extracting")
-    extract_kwargs: dict[str, Any] = {}
-    if pages is not None:
-        # marker expects a range string; pymupdf expects a list of indices.
-        extract_kwargs["pages"] = pages
-        extract_kwargs["page_range"] = ",".join(str(p) for p in pages)
-    extract_report = eng.extract(
-        pdf,
-        extraction_dir,
-        enable_formula=enable_formula,
-        enable_table=True,
-        **extract_kwargs,
-    )
+    total_pages = _quick_page_count(pdf)
+    if pages is None and total_pages > SEGMENT_PAGE_THRESHOLD:
+        # Oversized document: windowed extraction (v0.9.3)
+        extract_report = _extract_segmented(
+            eng,
+            pdf,
+            extraction_dir,
+            total_pages,
+            enable_formula=enable_formula,
+            stage_cb=_stage,
+        )
+    else:
+        extract_kwargs: dict[str, Any] = {}
+        if pages is not None:
+            # marker expects a range string; pymupdf expects a list of indices.
+            extract_kwargs["pages"] = pages
+            extract_kwargs["page_range"] = ",".join(str(p) for p in pages)
+        extract_report = eng.extract(
+            pdf,
+            extraction_dir,
+            enable_formula=enable_formula,
+            enable_table=True,
+            **extract_kwargs,
+        )
 
     if not extract_report.ok:
         return {
@@ -1368,6 +1469,65 @@ def search_corpus(
         return _json({"ok": False, "error": str(exc)})
 
 
+# ── Per-file circuit breaker for batch conversion (v0.9.3) ──────────────
+# Pilot forensics: one formula-dense 58-page paper ran 115 minutes. Without
+# a breaker, a single slow document can eat a whole overnight budget. Each
+# file runs in a fresh subprocess: timeouts are enforceable (terminate) and
+# engine state/memory is returned to the OS after every document.
+
+
+def _pipeline_child(pdf_str: str, kwargs: dict[str, Any], queue: Any) -> None:
+    """Subprocess entry (module-level for spawn picklability)."""
+    try:
+        result = _run_pipeline(Path(pdf_str), **kwargs)
+        result.pop("markdown_text", None)  # keep the pipe payload small
+        queue.put(result)
+    except Exception as exc:  # noqa: BLE001 — child must always report
+        queue.put({"ok": False, "error": str(exc)[:300]})
+
+
+def _run_pipeline_isolated(
+    pdf: Path,
+    kwargs: dict[str, Any],
+    timeout_s: float,
+    target: Any = _pipeline_child,
+) -> dict[str, Any]:
+    """Run one conversion in a fresh subprocess with a hard timeout.
+
+    Reads the result from the queue BEFORE joining (large payloads deadlock
+    the pipe otherwise). On timeout the child is terminated and the
+    inference services are restarted — an overloaded document likely left
+    their queues poisoned (pilot contagion finding).
+    """
+    import multiprocessing as mp
+    import queue as queue_mod
+
+    from pdf_capture_mcp.engines.marker_engine import restart_inference_services
+
+    ctx = mp.get_context("spawn")
+    q = ctx.Queue()
+    proc = ctx.Process(target=target, args=(str(pdf), kwargs, q), daemon=True)
+    proc.start()
+    try:
+        result: dict[str, Any] = q.get(timeout=timeout_s)
+        proc.join(30)
+        return result
+    except queue_mod.Empty:
+        proc.terminate()
+        proc.join(10)
+        if proc.is_alive():
+            proc.kill()
+        restart_inference_services()
+        return {
+            "ok": False,
+            "timed_out": True,
+            "error": f"Per-file timeout after {timeout_s / 60:.0f} min — conversion "
+            "terminated, inference services restarted for the next file.",
+        }
+    finally:
+        q.close()
+
+
 @mcp.tool()
 def batch_convert(
     dir_path: str,
@@ -1377,6 +1537,7 @@ def batch_convert(
     index: bool = False,
     engine: str = "auto",
     skip_existing: bool = True,
+    per_file_timeout_minutes: int = 40,
 ) -> str:
     """Convert every PDF in a directory into knowledge packages (async job).
 
@@ -1400,6 +1561,11 @@ def batch_convert(
             into the vector store after conversion.
         engine: Extraction engine ('auto', 'marker', 'mineru').
         skip_existing: Skip PDFs whose doc_id already has a package.
+        per_file_timeout_minutes: Circuit breaker — a document exceeding
+            this budget is terminated (recorded as timed_out) and the batch
+            moves on; inference services are restarted to clear any backlog
+            the oversized document left behind. Each file runs in a fresh
+            subprocess, so memory is fully returned between documents.
 
     Returns:
         JSON with job_id — poll get_job_status(job_id) for progress/results.
@@ -1443,14 +1609,21 @@ def batch_convert(
                         entry.update(skipped=True, package_dir=known[doc_id])
                         results.append(entry)
                         continue
-                    result = _run_pipeline(
+                    result = _run_pipeline_isolated(
                         pdf,
-                        engine=engine,
-                        enable_formula=True,
-                        out_dir=out_dir,
-                        package=True,
+                        {
+                            "engine": engine,
+                            "enable_formula": True,
+                            "out_dir": out_dir,
+                            "package": True,
+                        },
+                        timeout_s=per_file_timeout_minutes * 60,
                     )
                     entry["ok"] = bool(result.get("ok"))
+                    if result.get("timed_out"):
+                        entry["timed_out"] = True
+                    if not entry["ok"] and result.get("error"):
+                        entry["error"] = str(result["error"])[:300]
                     pkg_dir = result.get("package", {}).get("package_dir", "")
                     entry["package_dir"] = pkg_dir
                     entry["qc_verdict"] = result.get("qc_verdict", "")

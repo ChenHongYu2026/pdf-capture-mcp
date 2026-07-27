@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.3] - 2026-07-27
+
+Scale-resilience release. A 10-document stratified pilot (498 pages) produced
+three forensic findings: a 245-page PDF overloaded the resident inference
+service AND its backlog poisoned every subsequent document; a formula-dense
+58-page paper ran 115 minutes; memory stayed flat (the feared leak never
+happened). Each finding gets a structural fix.
+
+### Added
+
+- **Segmented extraction for oversized documents**: PDFs above 100 pages
+  are extracted in 80-page windows and merged — per-segment image
+  namespacing (s<k>_ prefix + reference rewrite), ordered md concatenation,
+  one retry per segment after a service restart. Keeps every inference
+  batch inside the service's safe zone.
+- **`restart_inference_services()`** (marker engine): kills the resident
+  llama-server / surya helpers so the next call starts clean; marker
+  re-spawns them on demand. Called automatically on segment failure and
+  batch-file timeout — the contagion path is now self-healing.
+- **Per-file circuit breaker in batch_convert**
+  (`per_file_timeout_minutes=40`): each file runs in a fresh subprocess —
+  timeouts are enforceable, memory returns to the OS between documents, a
+  timed-out file is recorded and the batch moves on. The night budget is
+  now bounded.
+
+### Fixed
+
+- marker engine accepted `page_range` via kwargs but never wired it into
+  the marker config — page-limited extraction silently converted the whole
+  document. Fixed (segmented extraction depends on it).
+
 ## [0.9.2] - 2026-07-27
 
 Forensics follow-up to 0.9.1: re-running the magazine's Exhibit-4 table
