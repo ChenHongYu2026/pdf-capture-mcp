@@ -13,8 +13,14 @@ from pdf_capture_mcp.engines import marker_engine
 from pdf_capture_mcp.server import (
     _extract_segmented,
     _run_pipeline_isolated,
+    _run_segment_isolated,
 )
 from pdf_capture_mcp.types import ExtractReport
+
+
+def _inline_runner(eng, pdf, seg_dir, kwargs, timeout_s):
+    """Synchronous in-process runner for engine stubs (no spawn)."""
+    return eng.extract(pdf, seg_dir, **kwargs)
 
 
 class _FakeEngine:
@@ -58,6 +64,7 @@ def test_segmented_merge_order_and_image_namespacing(tmp_path):
         200,
         enable_formula=True,
         stage_cb=lambda s: None,
+        _runner=_inline_runner,
     )
     assert report.ok and report.metadata["segments"] == 3
     assert eng.page_ranges == ["0-79", "80-159", "160-199"]
@@ -90,6 +97,7 @@ def test_segmented_retries_after_service_restart(tmp_path, monkeypatch):
         200,
         enable_formula=True,
         stage_cb=lambda s: None,
+        _runner=_inline_runner,
     )
     assert report.ok  # segment 1 succeeded on retry
     assert restarts == [1]  # exactly one hygiene restart
@@ -110,6 +118,7 @@ def test_segmented_reports_segment_on_double_failure(tmp_path, monkeypatch):
         200,
         enable_formula=True,
         stage_cb=lambda s: None,
+        _runner=_inline_runner,
     )
     assert not report.ok
     assert "Segment 1/3" in report.error and "pages 1-80" in report.error
@@ -165,3 +174,86 @@ def test_restart_inference_services_signals_patterns(monkeypatch):
     assert killed == 2
     assert any("llama-server" in " ".join(c) for c in calls)
     assert any("surya" in " ".join(c) for c in calls)
+
+
+# ── v0.9.4: segment breaker + honest degradation ────────────────────────────
+
+
+def test_segment_degrades_to_fallback_engine(tmp_path, monkeypatch):
+    """marker times out twice -> pymupdf fallback rescues the segment and
+    the degradation is recorded (never silent)."""
+    restarts: list[int] = []
+    monkeypatch.setattr(
+        marker_engine, "restart_inference_services", lambda: restarts.append(1) or 1
+    )
+
+    def timeout_runner(eng, pdf, seg_dir, kwargs, timeout_s):
+        k = int(Path(seg_dir).name.split("_")[1])
+        if k == 1:
+            return None  # segment 1 wedges the OCR service both times
+        return eng.extract(pdf, seg_dir, **kwargs)
+
+    fallback = _FakeEngine()  # stands in for pymupdf
+
+    def fb_extract(pdf, seg_dir, **kw):
+        out = Path(seg_dir)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "full_text.md").write_text("# Degraded segment text\n", encoding="utf-8")
+        return ExtractReport(ok=True, engine="pymupdf", full_text_md=str(out / "full_text.md"))
+
+    fallback.extract = fb_extract  # type: ignore[method-assign]
+
+    report = _extract_segmented(
+        _FakeEngine(),
+        tmp_path / "big.pdf",
+        tmp_path / "ex",
+        200,
+        enable_formula=True,
+        stage_cb=lambda s: None,
+        _runner=timeout_runner,
+        _fallback=fallback,
+    )
+    assert report.ok
+    assert report.metadata["degraded_segments"] == [2]  # human-numbered
+    md = Path(report.full_text_md).read_text()
+    assert "# Degraded segment text" in md  # content preserved
+    assert "# Segment 0" in md and "# Segment 2" in md  # others full quality
+    assert len(restarts) == 2  # retry hygiene + pre-degradation hygiene
+
+
+def test_real_segment_isolation_round_trip(tmp_path):
+    """True subprocess path with the registered pymupdf engine."""
+    import fitz
+
+    pdf = tmp_path / "t.pdf"
+    doc = fitz.open()
+    page = doc.new_page()
+    page.insert_text((72, 100), "hello segmented world with enough text to extract")
+    doc.save(str(pdf))
+    doc.close()
+
+    class _Named:
+        name = "pymupdf"
+
+    report = _run_segment_isolated(
+        _Named(),
+        pdf,
+        tmp_path / "seg_0",
+        {"enable_formula": False, "enable_table": False, "pages": [0]},
+        timeout_s=120,
+    )
+    assert report is not None and report.ok
+
+
+def test_real_segment_isolation_timeout(tmp_path):
+    class _Named:
+        name = "pymupdf"
+
+    report = _run_segment_isolated(
+        _Named(),
+        tmp_path / "missing.pdf",
+        tmp_path / "seg_0",
+        {"enable_formula": False},
+        timeout_s=0.05,
+    )
+    assert report is None  # timed out while the child was spawning

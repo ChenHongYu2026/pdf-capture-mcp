@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4] - 2026-07-28
+
+Fourth pilot forensic finding, structural fix. The 245-page regression
+showed segment 1 (80 pages) passing cleanly in 8.6 min while segment 2
+wedged the OCR service with 10 timeouts: windowing solved TOTAL overload,
+but a single ultra-dense page can still kill its segment — and marker
+retries internally forever, so the failure is invisible from inside.
+
+### Added
+
+- **Per-segment circuit breaker**: each segment runs in its own subprocess
+  with a hard timeout (20 min default). Timeout/failure -> inference
+  services restarted -> one retry in a fresh subprocess.
+- **Honest degradation**: a segment failing twice falls back to the
+  pymupdf text-layer engine (content preserved in seconds, layout fidelity
+  reduced) instead of killing the document. Degraded segments are recorded
+  in metadata['degraded_segments'], surfaced in qc_report, and force the
+  verdict to at least WARN — degradation is never silent. Batch runs no
+  longer have a "whole document FAILED" category for oversized files.
+
+### Fixed
+
+- Batch per-file isolation used a daemonic subprocess; daemonic processes
+  may not have children, which broke segmented extraction (and marker's
+  own workers) when nested inside batch_convert. Now daemon=False.
+
 ## [0.9.3] - 2026-07-27
 
 Scale-resilience release. A 10-document stratified pilot (498 pages) produced
