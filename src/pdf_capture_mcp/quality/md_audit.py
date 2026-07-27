@@ -479,9 +479,11 @@ def _pdf_token_layers(pdf_path: Path | str) -> tuple[Counter[str], Counter[str]]
     body: Counter[str] = Counter()
     figure: Counter[str] = Counter()
     total_chars = 0
+    line_pages: dict[str, set[int]] = {}
+    page_lines: list[list[str]] = []
     try:
         with fitz.open(str(pdf_path)) as doc:
-            for page in doc:
+            for pno, page in enumerate(doc):
                 regions = _figure_rects(page)
                 body_words: list[str] = []
                 for w in page.get_text("words"):
@@ -503,12 +505,37 @@ def _pdf_token_layers(pdf_path: Path | str) -> tuple[Counter[str], Counter[str]]
                     else:
                         merged_words.append(wtext)
                 body.update(t.lower() for t in _TOKEN.findall(" ".join(merged_words)))
+                # Track lines for running-furniture detection (magazine
+                # calibration): nav bars / footers repeat across pages.
+                lines_here = [
+                    s
+                    for s in (ln.strip() for ln in page.get_text().splitlines())
+                    if 4 < len(s) < 120
+                ]
+                page_lines.append(lines_here)
+                for s in set(lines_here):
+                    line_pages.setdefault(s, set()).add(pno)
     except Exception as exc:  # noqa: BLE001 — coverage is best-effort
         logger.warning("Coverage check failed to read PDF: %s", exc)
         return None
 
     if total_chars < 200:  # scanned PDF: no usable text layer
         return None
+
+    # Running-furniture exemption (learned from an InDesign magazine audit):
+    # lines repeating on many pages (chapter nav bars, branded footers) are
+    # NOISE the engine correctly drops — billing their tokens as "missing
+    # body content" turns a cleanup victory into a false MD-201 critical.
+    furniture_threshold = max(3, int(len(page_lines) * 0.3))
+    furniture_lines = {s for s, pages in line_pages.items() if len(pages) >= furniture_threshold}
+    if furniture_lines:
+        furniture: Counter[str] = Counter()
+        for lines_here in page_lines:
+            for s in lines_here:
+                if s in furniture_lines:
+                    furniture.update(t.lower() for t in _TOKEN.findall(s))
+        body.subtract(furniture)
+        body = Counter({t: n for t, n in body.items() if n > 0})
     return body, figure
 
 

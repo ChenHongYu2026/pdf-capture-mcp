@@ -396,3 +396,26 @@ def test_locate_table_region_ignores_stray_hits(tmp_path):
     assert located is not None
     _, rect, _ = located
     assert rect.y0 > 400  # stray hit at y=80 excluded from the crop
+
+
+def test_md201_exempts_running_furniture(tmp_path):
+    """v0.9.1: nav bars/footers repeating across pages are exempt from the
+    coverage deficit — dropping them is a cleanup victory, not content loss."""
+    from pdf_capture_mcp.quality.md_audit import check_content_coverage
+
+    pdf = tmp_path / "mag.pdf"
+    doc = fitz.open()
+    bodies = []
+    for i in range(6):
+        page = doc.new_page()
+        body = f"Unique body paragraph number {i} with meaningful editorial content here."
+        page.insert_text((72, 200), body)
+        page.insert_text((72, 800), "Chapter navigation bar repeated on every page")
+        bodies.append(body)
+    doc.save(str(pdf))
+    doc.close()
+
+    md = "\n\n".join(bodies) + "\n"  # engine dropped the nav bar (correctly)
+    issue = check_content_coverage(pdf, md)
+    # All missing tokens are furniture -> exempt -> no issue (or info-level dust)
+    assert issue is None or issue.severity == "info", issue and issue.message
