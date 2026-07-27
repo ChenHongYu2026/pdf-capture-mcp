@@ -15,6 +15,33 @@ from pdf_capture_mcp.types import ExtractReport
 
 logger = get_logger("engines.marker")
 
+
+def restart_inference_services() -> int:
+    """Kill marker's helper inference services so the next call starts clean.
+
+    Pilot forensics: one oversized document flooded the resident
+    llama-server queue and every SUBSEQUENT document timed out against the
+    backlog — the failure was contagious. marker re-spawns these services
+    on demand, so killing them is always safe. Returns processes signalled.
+    """
+    import subprocess
+
+    killed = 0
+    for pattern in ("llama-server", "surya.[a-z_]*.server"):
+        try:
+            r = subprocess.run(["pkill", "-f", pattern], capture_output=True, timeout=10)
+            if r.returncode == 0:
+                killed += 1
+        except Exception:  # noqa: BLE001 — best-effort hygiene
+            pass
+    if killed:
+        import time as _time
+
+        _time.sleep(2)  # let sockets close before the next spawn
+        logger.info("Inference services restarted (%d pattern(s) matched)", killed)
+    return killed
+
+
 # Lazy-loaded model dict (shared across calls to avoid re-initialization)
 _model_dict: Any = None
 
@@ -93,6 +120,13 @@ class MarkerEngine:
                 "output_format": "markdown",
                 "mode": mode,
             }
+            # Segment/preview support: marker accepts a page_range string
+            # ("0-79"). Previously accepted via **kwargs but never wired
+            # into the config — fixed in v0.9.3 (segmented extraction
+            # depends on it).
+            page_range = kwargs.get("page_range", "")
+            if page_range:
+                config["page_range"] = page_range
             if disable_ocr:
                 config["disable_ocr"] = True
             if force_ocr:
