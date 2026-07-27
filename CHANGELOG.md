@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.2] - 2026-07-27
+
+Forensics follow-up to 0.9.1: re-running the magazine's Exhibit-4 table
+revealed a third layer of the problem — marker had read the year headers
+from pixels but placed them in a figure ALT-TEXT next to the table, so the
+L1 baseline missed them and the sparse table block made the L2 ratio
+meaningless.
+
+### Fixed
+
+- Numeric-gate L1 baseline now includes the md NEIGHBORHOOD (±6 lines
+  around the table block): marker's independently-seen numbers count no
+  matter where its layout analysis placed them.
+- L2 requires a minimum sample (>=4 known numbers) before the coverage
+  ratio may hard-veto; sparse evidence escalates to L3 verification
+  instead of failing.
+
 ## [0.9.1] - 2026-07-27
 
 Autonomous-gate release, driven by an InDesign magazine field audit (79

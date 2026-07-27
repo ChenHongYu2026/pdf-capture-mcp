@@ -143,7 +143,9 @@ def _locate_table_region(
     return pno, padded, region_text
 
 
-def _numeric_gate(html: str, region_text: str, md_block_text: str) -> tuple[str, str, set[str]]:
+def _numeric_gate(
+    html: str, region_text: str, md_block_text: str, md_context: str = ""
+) -> tuple[str, str, set[str]]:
     """Anti-hallucination / anti-loss gate. Returns (status, detail, disputed).
 
     status: 'pass' | 'fail' | 'verify' (needs an L3 self-verification round).
@@ -172,17 +174,24 @@ def _numeric_gate(html: str, region_text: str, md_block_text: str) -> tuple[str,
     if lost:
         return "fail", f"numbers lost from source table: {sorted(lost)[:8]}", set()
 
-    invented = html_nums - (region_nums | md_nums)  # L1: dual-vision baseline
+    context_nums = set(_NUM.findall(md_context))
+    # L1: dual-vision baseline. marker's OCR is an independent visual
+    # channel — and its numbers may land NEAR the table rather than in it
+    # (magazine forensics: year headers ended up in a figure alt-text), so
+    # the block's md NEIGHBORHOOD is part of the baseline too.
+    invented = html_nums - (region_nums | md_nums | context_nums)
     if not invented:
         return "pass", f"{len(html_nums)} numbers conserved", set()
 
-    # L2: is the text layer trustworthy enough to veto?
-    coverage = len(region_nums & md_nums) / max(1, len(md_nums))
-    if coverage < 0.5:
+    # L2: is the text layer trustworthy enough to veto? Requires a minimum
+    # sample — with too few marker numbers the coverage ratio is noise.
+    known = md_nums | context_nums
+    coverage = len(region_nums & known) / max(1, len(known))
+    if len(known) < 4 or coverage < 0.5:
         return (
             "verify",
-            f"text layer covers only {coverage:.0%} of marker's numbers — "
-            f"unfit to veto; disputed: {sorted(invented)[:8]}",
+            f"text layer covers only {coverage:.0%} of marker's numbers "
+            f"(sample={len(known)}) — unfit to veto; disputed: {sorted(invented)[:8]}",
             invented,
         )
     return "fail", f"invented numbers: {sorted(invented)[:8]}", invented
@@ -253,7 +262,10 @@ def vlm_repair_table(
         )
     html = m.group(0)
 
-    status, detail, disputed = _numeric_gate(html, region_text, "\n".join(block))
+    context = "\n".join(md_lines[max(0, start - 6) : start] + md_lines[end + 1 : end + 7])
+    status, detail, disputed = _numeric_gate(
+        html, region_text, "\n".join(block), md_context=context
+    )
     if status == "verify":
         # L3: corrupted text layer can't veto — ask the VLM to VERIFY the
         # disputed numbers against the image (discrimination round).
