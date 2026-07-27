@@ -143,23 +143,25 @@ def _locate_table_region(
     return pno, padded, region_text
 
 
-def _numeric_gate(html: str, region_text: str, md_block_text: str) -> tuple[bool, str]:
-    """Anti-hallucination / anti-loss gate for VLM table output.
+def _numeric_gate(html: str, region_text: str, md_block_text: str) -> tuple[str, str, set[str]]:
+    """Anti-hallucination / anti-loss gate. Returns (status, detail, disputed).
 
-    - invented: numbers in the HTML that the region's text layer never had
-      (hallucination) -> hard fail.
-    - lost: numbers from the broken markdown block that the HTML neither
-      contains directly nor as part of a recombined value (torn fragments
-      '6' + '0' legitimately become '6.0') -> hard fail.
-    Region-edge numbers missing from the HTML (captions etc.) are tolerated.
+    status: 'pass' | 'fail' | 'verify' (needs an L3 self-verification round).
+
+    Three-tier autonomous design (magazine-audit finding: a corrupted text
+    layer must not veto a correct transcription):
+    - L1 dual-vision baseline: marker's OCR output (the md block) is an
+      INDEPENDENT visual channel — a number seen by both vision systems is
+      no hallucination, even when the text layer never had it.
+    - L2 text-layer health: if the text layer covers little of what marker
+      read (ligature corruption, CID gaps), it is unfit to veto; disputed
+      numbers escalate to L3 instead of hard-failing.
+    - lost check is baseline-independent: numbers from the broken md block
+      must survive into the HTML (torn fragments '6'+'0' -> '6.0' are fine).
     """
     html_nums = set(_NUM.findall(_TAG.sub(" ", html)))
     region_nums = set(_NUM.findall(region_text))
     md_nums = set(_NUM.findall(md_block_text))
-
-    invented = html_nums - region_nums
-    if invented:
-        return False, f"invented numbers: {sorted(invented)[:8]}"
 
     dotless = [h.replace(".", "") for h in html_nums]
     lost = {
@@ -168,8 +170,47 @@ def _numeric_gate(html: str, region_text: str, md_block_text: str) -> tuple[bool
         if not any(n in d for d in dotless)  # fragment recombination check
     }
     if lost:
-        return False, f"numbers lost from source table: {sorted(lost)[:8]}"
-    return True, f"{len(html_nums)} numbers conserved"
+        return "fail", f"numbers lost from source table: {sorted(lost)[:8]}", set()
+
+    invented = html_nums - (region_nums | md_nums)  # L1: dual-vision baseline
+    if not invented:
+        return "pass", f"{len(html_nums)} numbers conserved", set()
+
+    # L2: is the text layer trustworthy enough to veto?
+    coverage = len(region_nums & md_nums) / max(1, len(md_nums))
+    if coverage < 0.5:
+        return (
+            "verify",
+            f"text layer covers only {coverage:.0%} of marker's numbers — "
+            f"unfit to veto; disputed: {sorted(invented)[:8]}",
+            invented,
+        )
+    return "fail", f"invented numbers: {sorted(invented)[:8]}", invented
+
+
+_VERIFY_PROMPT = (
+    "Look at this table image. Are ALL of the following numbers visible in "
+    "the image: {nums}? Reply with exactly CONFIRMED if every one of them "
+    "appears in the image; otherwise list the numbers that do NOT appear. "
+    "No other commentary."
+)
+
+
+def _vlm_self_verify(img_b64: str, disputed: set[str]) -> bool:
+    """L3: a second, independent VLM round in VERIFICATION mode.
+
+    Discrimination is far more reliable than generation — asking 'is this
+    number in the image?' has a much lower hallucination rate than free
+    transcription. Used only when the text layer is unfit to veto (L2).
+    """
+    from pdf_capture_mcp.llm_client import call_vlm
+
+    prompt = _VERIFY_PROMPT.format(nums=", ".join(sorted(disputed)[:12]))
+    try:
+        reply = _strip_reply(call_vlm(prompt, img_b64, max_tokens=200, timeout=90))
+    except Exception:  # noqa: BLE001 — verification failure means no confirmation
+        return False
+    return "CONFIRMED" in reply.upper()
 
 
 def vlm_repair_table(
@@ -212,8 +253,17 @@ def vlm_repair_table(
         )
     html = m.group(0)
 
-    ok, detail = _numeric_gate(html, region_text, "\n".join(block))
-    if not ok:
+    status, detail, disputed = _numeric_gate(html, region_text, "\n".join(block))
+    if status == "verify":
+        # L3: corrupted text layer can't veto — ask the VLM to VERIFY the
+        # disputed numbers against the image (discrimination round).
+        if _vlm_self_verify(img_b64, disputed):
+            status = "pass"
+            detail += " | disputed numbers CONFIRMED by L3 self-verification"
+        else:
+            status = "fail"
+            detail += " | L3 self-verification did not confirm; original kept"
+    if status != "pass":
         return RepairAction(
             issue.rule,
             STATUS_REPORTED,

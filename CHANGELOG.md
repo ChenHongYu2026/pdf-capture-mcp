@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.1] - 2026-07-27
+
+Autonomous-gate release, driven by an InDesign magazine field audit (79
+pages, per-page nav bars, corrupted ligature text layer). Goal: 100-magazine
+batches with ZERO per-table human review.
+
+### Fixed
+
+- **Three-tier autonomous numeric gate** (vlm_repair): a corrupted text
+  layer no longer vetoes correct VLM transcriptions.
+  - L1 dual-vision baseline: marker's OCR output is an independent visual
+    channel — numbers seen by both vision systems are never "invented".
+  - L2 text-layer health: a layer covering <50% of marker's numbers is
+    unfit to veto; disputed numbers escalate instead of hard-failing.
+  - L3 VLM self-verification: one discrimination round ("are these numbers
+    visible in the image?") — far lower hallucination rate than generation.
+    Unconfirmed -> report (keep marker's table); pipeline never blocks on
+    a human.
+- **MD-201 running-furniture exemption**: lines repeating across >=30% of
+  pages (chapter nav bars, branded footers) are exempt from the coverage
+  deficit — the magazine audit showed the engine's correct noise cleanup
+  being billed as 7.71% "critical content loss".
+
 ## [0.9.0] - 2026-07-27
 
 Scale-out release: directory-level batch processing plus the two precision

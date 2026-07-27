@@ -72,22 +72,27 @@ def _issues_for(md: str):
 
 
 def test_gate_passes_on_conserved_numbers():
-    ok, detail = _numeric_gate(GOOD_HTML, "Small 0.5M 6.0x10-4 Medium 3.0x10-4 10 4", TORN_MD)
-    assert ok, detail
+    status, detail, _ = _numeric_gate(
+        GOOD_HTML, "Small 0.5M 6.0x10-4 Medium 3.0x10-4 10 4", TORN_MD
+    )
+    assert status == "pass", detail
 
 
 def test_gate_rejects_invented_numbers():
     bad = GOOD_HTML.replace("6.0", "7.77")
-    ok, detail = _numeric_gate(bad, "Small 0.5M 6.0x10-4 Medium 3.0x10-4 10 4", TORN_MD)
-    assert not ok
-    assert "invented" in detail
+    status, detail, disputed = _numeric_gate(
+        bad, "Small 0.5M 6.0x10-4 Medium 3.0x10-4 10 4", TORN_MD
+    )
+    # Tampering trips the gate either way: the fabricated 7.77 is invented
+    # AND the original fragment 6 is lost — both are hard fails.
+    assert status == "fail"
 
 
 def test_gate_rejects_lost_numbers():
     # HTML drops the Medium row entirely -> md numbers '3' lost.
     partial = "<table><tr><td>Small</td><td>0.5M</td><td>6.0 x 10<sup>-4</sup></td></tr></table>"
-    ok, detail = _numeric_gate(partial, "Small 0.5M 6.0x10-4 Medium 3.0x10-4 10 4", TORN_MD)
-    assert not ok
+    status, detail, _ = _numeric_gate(partial, "Small 0.5M 6.0x10-4 Medium 3.0x10-4 10 4", TORN_MD)
+    assert status == "fail"
     assert "lost" in detail
 
 
@@ -215,3 +220,58 @@ def test_vlm_policy_defaults_to_full_for_legacy_config(monkeypatch):
     assert llm.get_vlm_policy() == "full"
     monkeypatch.setattr(llm, "_load_config", lambda: {"policy": "tables_only"})
     assert llm.get_vlm_policy() == "tables_only"
+
+
+# ── v0.9.1: three-tier autonomous gate ──────────────────────────────────────
+
+
+def test_gate_l1_dual_vision_baseline():
+    """A number marker's OCR saw (md block) is never 'invented', even when
+    the text layer lacks it (ligature corruption)."""
+    html = "<table><tr><td>1928</td><td>2000</td></tr></table>"
+    md_block = "| 1928 | 2000 |"  # marker read these from pixels
+    corrupted_region = "fifl ffiff fifl"  # text layer garbage, no digits
+    status, detail, _ = _numeric_gate(html, corrupted_region, md_block)
+    assert status == "pass", detail
+
+
+def test_gate_l2_escalates_to_verify_on_corrupted_layer():
+    """Text layer covering <50% of marker's numbers is unfit to veto."""
+    html = "<table><tr><td>1928</td><td>2000</td><td>77</td></tr></table>"
+    md_block = "| 1928 | 2000 |"  # 77 is disputed (neither source has it)
+    corrupted_region = "fifl ffiff"  # covers 0% of marker's numbers
+    status, detail, disputed = _numeric_gate(html, corrupted_region, md_block)
+    assert status == "verify"
+    assert disputed == {"77"}
+
+
+def test_gate_l2_healthy_layer_still_vetoes():
+    """A healthy text layer keeps its veto power over invented numbers."""
+    html = "<table><tr><td>1928</td><td>77</td></tr></table>"
+    md_block = "| 1928 |"
+    healthy_region = "table year 1928 result"  # covers 100% of marker's numbers
+    status, detail, _ = _numeric_gate(html, healthy_region, md_block)
+    assert status == "fail"
+
+
+def test_l3_self_verification_accepts_confirmed(table_pdf, monkeypatch):
+    """Full path: corrupted layer -> verify -> VLM confirms -> repaired."""
+    import pdf_capture_mcp.llm_client as llm
+
+    calls = []
+
+    def fake_vlm(prompt, img, **kw):
+        calls.append(prompt)
+        if "CONFIRMED" in prompt or "visible in" in prompt:
+            return "CONFIRMED"
+        return GOOD_HTML.replace("0.5M", "0.5M</td><td>777")  # adds disputed 777
+
+    monkeypatch.setattr(llm, "call_vlm", fake_vlm)
+    monkeypatch.setattr(vlm_repair, "_locate_table_region", lambda *a: (0, None, "fifl ffiff"))
+    monkeypatch.setattr(vlm_repair, "_render_region", lambda *a, **k: "imgb64")
+    issues = _issues_for(TORN_MD)
+    result = run_vlm_arbitration(TORN_MD, table_pdf, issues, repair_tables=True)
+    action = result["actions"][0]
+    assert action.status == "repaired", action.description
+    assert "L3 self-verification" in action.description
+    assert len(calls) == 2  # transcription + verification round
