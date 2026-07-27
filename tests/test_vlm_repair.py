@@ -247,9 +247,9 @@ def test_gate_l2_escalates_to_verify_on_corrupted_layer():
 
 def test_gate_l2_healthy_layer_still_vetoes():
     """A healthy text layer keeps its veto power over invented numbers."""
-    html = "<table><tr><td>1928</td><td>77</td></tr></table>"
-    md_block = "| 1928 |"
-    healthy_region = "table year 1928 result"  # covers 100% of marker's numbers
+    html = "<table><tr><td>1928</td><td>1967</td><td>1980</td><td>2000</td><td>77</td></tr></table>"
+    md_block = "| 1928 | 1967 | 1980 | 2000 |"  # sample >= 4: ratio is meaningful
+    healthy_region = "years 1928 1967 1980 2000 in text"  # covers 100%
     status, detail, _ = _numeric_gate(html, healthy_region, md_block)
     assert status == "fail"
 
@@ -275,3 +275,20 @@ def test_l3_self_verification_accepts_confirmed(table_pdf, monkeypatch):
     assert action.status == "repaired", action.description
     assert "L3 self-verification" in action.description
     assert len(calls) == 2  # transcription + verification round
+
+
+def test_gate_l1_neighborhood_context_baseline():
+    """Numbers marker placed NEAR the table (figure alt-text) count too."""
+    html = "<table><tr><th>1912</th><th>2025</th></tr></table>"
+    md_block = "| U.S. Steel | Nvidia |"  # no digits in the block itself
+    ctx = "![A timeline chart from 1912 to 2025 showing firms]"
+    status, detail, _ = _numeric_gate(html, "fifl garbage", md_block, md_context=ctx)
+    assert status == "pass", detail
+
+
+def test_gate_l2_small_sample_escalates():
+    """Too few marker numbers -> coverage ratio is noise -> verify, not fail."""
+    html = "<table><tr><td>1928</td><td>99</td></tr></table>"
+    md_block = "| a | 1928 |"  # single number: sample too small to veto
+    status, _, disputed = _numeric_gate(html, "healthy words 1928 here", md_block)
+    assert status == "verify" and disputed == {"99"}
