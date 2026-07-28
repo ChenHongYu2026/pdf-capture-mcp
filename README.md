@@ -301,6 +301,7 @@ Models (~2GB) auto-download from ModelScope on first extraction.
 | `PDF_CAPTURE_CACHE_DIR` | `~/.cache/pdf-capture-mcp` | Model & config cache (also stores job state) |
 | `PDF_CAPTURE_MINERU_VENV` | `<cache>/venv-mineru` | MinerU venv location |
 | `PDF_CAPTURE_LOG_LEVEL` | `INFO` | Logging level |
+| `PDF_CAPTURE_SEGMENT_TIMEOUT_S` | `1200` | Per-segment extraction budget for oversized documents (scans get 3x automatically) |
 | `MINERU_MODEL_SOURCE` | `modelscope` | MinerU model source: `modelscope` / `huggingface` / `local` |
 | `HF_ENDPOINT` | huggingface.co | HuggingFace mirror for model downloads (e.g. `https://hf-mirror.com`) |
 | `HF_HUB_DISABLE_XET` | — | Set `1` when using a mirror (auto-set by `download_models`) |
@@ -594,6 +595,7 @@ pdf-capture-mcp setup-mineru   # 需要 PATH 中有 Python 3.11
 | `PDF_CAPTURE_CACHE_DIR` | `~/.cache/pdf-capture-mcp` | 模型与配置缓存目录（同时存储任务状态） |
 | `PDF_CAPTURE_MINERU_VENV` | `<cache>/venv-mineru` | MinerU 虚拟环境位置 |
 | `PDF_CAPTURE_LOG_LEVEL` | `INFO` | 日志级别 |
+| `PDF_CAPTURE_SEGMENT_TIMEOUT_S` | `1200` | 超大文档分段提取的单段预算（扫描件自动 3 倍） |
 | `MINERU_MODEL_SOURCE` | `modelscope` | MinerU 模型源：`modelscope` / `huggingface` / `local` |
 | `HF_ENDPOINT` | huggingface.co | HuggingFace 镜像站（如 `https://hf-mirror.com`） |
 | `HF_HUB_DISABLE_XET` | — | 使用镜像站时设为 `1`（`download_models` 会自动设置） |

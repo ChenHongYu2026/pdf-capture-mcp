@@ -46,6 +46,10 @@ class ClassifyResult:
     has_tables: bool = False
     page_count: int = 0
     language: str = ""
+    # v0.10.0: scanned-document detection (single source of truth for the
+    # pipeline's force-OCR / adaptive-timeout / honest-degradation switches).
+    is_scanned: bool = False
+    text_layer_coverage: float = 1.0
 
 
 @dataclass

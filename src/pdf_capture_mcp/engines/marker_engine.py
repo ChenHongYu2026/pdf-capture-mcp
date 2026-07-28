@@ -90,6 +90,20 @@ class MarkerEngine:
     def name(self) -> str:
         return "marker"
 
+    def warmup(self) -> bool:
+        """Preload marker models (segment 'ready' sentinel, v0.10.0).
+
+        Spawned segment children call this before signalling readiness so
+        the 1-3 minute model load never eats the segment's OCR budget.
+        """
+        if not self.is_available():
+            return False
+        try:
+            _get_model_dict()
+            return True
+        except Exception:  # noqa: BLE001 — warmup is best-effort
+            return False
+
     def is_available(self) -> bool:
         """Check if marker-pdf is installed."""
         try:

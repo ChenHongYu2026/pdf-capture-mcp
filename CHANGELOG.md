@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0] - 2026-07-28
+
+### Added
+
+- **Scanned-document support hardening.** A 900-page image-only scan used
+  to be a worst case: OCR-slow segments hit the fixed 20-min timeout, then
+  "degraded" to the pymupdf text-layer engine — which returns EMPTY text
+  for image-only pages while reporting ok=True. Whole 80-page windows
+  could vanish silently. Now:
+  - `classifier.detect_text_layer()` — single source of truth for scan
+    detection (evenly sampled pages; `is_scanned` +
+    `text_layer_coverage` on ClassifyResult and `pdf_info`).
+  - Scanned documents automatically run marker with `force_ocr=True` and
+    a 3x per-segment budget.
+  - Segment children emit a `ready` sentinel after model warmup, so the
+    1-3 minute spawned model load no longer eats the OCR budget
+    (`SEGMENT_READY_TIMEOUT_S`, two-phase wait).
+  - Honest loss over fake rescue: a failed window with no text layer is
+    never sent to pymupdf. It gets one half-window OCR retry; whatever
+    still fails is recorded in `metadata.missing_segments` with an
+    explicit `> [WARNING] ... content NOT captured.` placeholder in the
+    markdown, surfaces in qc_report, package metadata, and a top-level
+    response `warning`, and downgrades PASS to WARN.
+  - Near-empty guard: any fallback product under 50 chars/page counts as
+    a missing window, not a degradation — empty text can no longer
+    impersonate preserved content.
+  - Segment checkpoints: finished segments persist rewritten markdown +
+    a kwargs-hash `.seg_meta.json`; re-running the same out_dir after an
+    interruption reuses them instead of re-OCRing (a 6-15 h scan job now
+    loses at most the current segment on restart). Cleaned up only after
+    a successful merge.
+  - `PDF_CAPTURE_SEGMENT_TIMEOUT_S` env var (default 1200).
+  - Honest ETA (1.5 min/page for scans) in the async hint;
+    `batch_convert` stretches its per-file breaker to
+    `max(user value, pages * 1.5 min)` for scanned files (a 900-page scan
+    is no longer guaranteed dead at the default 40 min).
+  - qc_report `notes` states that MD-201/MD-202 and VLM table repair are
+    not applicable without a text layer (blindness made explicit).
+
 ## [0.9.6] - 2026-07-28
 
 ### Fixed
