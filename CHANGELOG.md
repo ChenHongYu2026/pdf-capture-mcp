@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.0] - 2026-07-28
+
+A post-import audit of a real Obsidian knowledge package surfaced the
+retrieval noise the chunker used to emit: 8-token image-only chunks that
+could never anchor to a page, footnote fragments posing as sections
+(`['Introduction', '1']`), and `<sup>` footnote lines leaking into table
+embed context. This release closes those gaps and derives human-readable
+document titles instead of download-artifact filenames.
+
+### Added
+
+- **N13 micro-chunk merge.** Text chunks under `MIN_CHUNK_TOKENS` (25) —
+  including image-only links that slip past the N6 fold at section
+  boundaries — merge into an adjacent text chunk under the same heading,
+  BEFORE page anchoring so the merged content anchors properly. The merge
+  never crosses a heading_path boundary, never touches table/figure/code
+  chunks, and never exceeds the hard cap; unmergeable noise survives
+  tagged `extra["micro"]`.
+- **N14 footnote demotion.** Pure-numeric H4+ pseudo-headings (`#### 3`,
+  marker's rendering of footnote definitions) no longer become fake
+  heading_path entries; the marker digit joins the note body as an
+  `"N. "` text prefix.
+- **`_derive_title`.** The document title now comes from the PDF metadata
+  Title field when it looks like real prose (sane length, has words, not
+  an authoring-tool source filename), falling back to the filename stem.
+  `2026_..._050526-4_69f9b41ca0945` becomes
+  "Microsoft 2026 Work Trend Index Annual Report" in frontmatter, README
+  and slug.
+
+### Fixed
+
+- Table embed context no longer picks `<sup>` footnote lines as captions
+  (S2 refinement — `(--) Additional country data...` was masquerading as
+  a table caption in embed_text).
+- The package README file map omits the `tables/` row when zero CSVs were
+  extracted — the directory does not exist in that case, and the row sent
+  agents to a dead path.
+
+### Changed
+
+- Re-converting an existing document can change some chunk_ids (merged
+  chunks re-derive their content-addressed ids, S6/N1 contract intact).
+  `build_vector_index` reconciles incrementally: stale points are
+  deleted, unchanged chunks are not re-embedded.
+
 ## [0.10.0] - 2026-07-28
 
 ### Added

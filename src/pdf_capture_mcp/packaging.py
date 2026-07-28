@@ -192,6 +192,20 @@ def build_frontmatter(
 # ── README (the agent map — one read explains the whole package) ────────────
 
 
+
+def _tables_row(n_tables_csv: int) -> str:
+    """File-map row for tables/ — omitted when no CSVs exist.
+
+    With zero CSVs the tables/ directory is never created; listing it in
+    the map would send agents to a path that does not exist.
+    """
+    if n_tables_csv == 0:
+        return ""
+    return (
+        f"\n| `tables/` | 表格 CSV，独立提取通道（{n_tables_csv} 个，命名含页码）"
+        " | 表格数据交叉验证 |"
+    )
+
 def build_readme(
     *,
     title: str,
@@ -230,8 +244,7 @@ QC: {qc_verdict} | doc_id: `{doc_id}`
 | `data/chunks.jsonl` | {n_chunks} 个语义分块，含页码/章节路径元数据 | RAG 索引、引用定位 |
 | `data/metadata.json` | 文档级元数据 + 标题树 + 产物清单(manifest) | 了解结构、校验完整性 |
 | `data/qc_report.json` | 质量审计与修复记录（11+ 规则） | 评估内容可信度 |
-| `images/` | 提取的图片（正文内相对引用） | 视觉内容 |
-| `tables/` | 表格 CSV，独立提取通道（{n_tables_csv} 个，命名含页码） | 表格数据交叉验证 |
+| `images/` | 提取的图片（正文内相对引用） | 视觉内容 |{_tables_row(n_tables_csv)}
 
 ## chunks.jsonl 行 schema (v{CHUNKS_SCHEMA_VERSION})
 

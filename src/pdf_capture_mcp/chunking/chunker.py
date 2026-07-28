@@ -20,6 +20,13 @@ Design contract (two audit rounds, see CHANGELOG 0.7.0):
   scanned PDFs degrade to page=None, never a guess (M4).
 - Repeated short lines (running headers that survived layout cleaning) are
   dropped and reported (N12).
+- Micro text chunks (< MIN_CHUNK_TOKENS, incl. image-only links that slip
+  past N6 at section boundaries) merge into an adjacent text chunk under
+  the same heading BEFORE page anchoring (N13 — noise chunks pollute
+  retrieval and can never anchor to a page).
+- Pure-numeric H4+ headings are footnote markers, not sections: they are
+  demoted to text and joined onto the following paragraph (N14 — marker
+  emits footnote definitions as `#### 3` pseudo-headings).
 """
 
 from __future__ import annotations
@@ -38,12 +45,14 @@ CHUNKS_SCHEMA_VERSION = "1"
 
 DEFAULT_BUDGET = 512  # target tokens per chunk (M1: conservative default)
 DEFAULT_HARD_CAP = 768  # never exceed; oversized blocks are split
+MIN_CHUNK_TOKENS = 25  # below this a text chunk is merge-candidate noise (N13)
 
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _PIPE_ROW = re.compile(r"^\s*\|.*\|\s*$")
 _PIPE_SEP = re.compile(r"^\s*\|[\s:|-]+\|\s*$")
 _FIGURE = re.compile(r"^!\[[^\]]*\]\([^)]+\)\s*$")
 _FIG_DESC = re.compile(r"^>\s*\*\*Figure")
+_FOOTNOTE_NUM = re.compile(r"^\d{1,3}$")  # N14: footnote-marker pseudo-heading
 _TAG = re.compile(r"<[^>]+>")
 _TOKEN = re.compile(r"[A-Za-z0-9]{4,}")
 _CAPTION = re.compile(r"^(Table|Figure|表|图)\s*[\d.::]+", re.IGNORECASE)
@@ -231,6 +240,35 @@ def _drop_running_headers(blocks: list[_Block], min_repeats: int = 4) -> list[st
     return dropped
 
 
+# ── Footnote demotion (N14: numeric pseudo-headings are note markers) ───────
+
+
+def _demote_footnote_headings(blocks: list[_Block]) -> list[_Block]:
+    """Rewrite pure-numeric H4+ headings as footnote text (N14).
+
+    Marker renders footnote definitions as `#### 3` followed by the note
+    body; left alone they become fake heading_path entries like
+    ['Introduction', '3']. Conservative match only: level >= 4 AND a bare
+    1-3 digit title. The marker joins the following paragraph as an
+    "N. " prefix so the note survives as ordinary text.
+    """
+    out: list[_Block] = []
+    for idx, block in enumerate(blocks):
+        if (
+            block.kind == "heading"
+            and block.level >= 4
+            and _FOOTNOTE_NUM.match(block.text)
+        ):
+            nxt = blocks[idx + 1] if idx + 1 < len(blocks) else None
+            if nxt is not None and nxt.kind == "text" and nxt.lines:
+                nxt.lines[0] = f"{block.text}. {nxt.lines[0].lstrip()}"
+                continue  # marker consumed by the note body
+            out.append(_Block("text", [block.text]))  # orphan: N13 folds it
+            continue
+        out.append(block)
+    return out
+
+
 # ── Heading paths (N11: disambiguate same-named siblings) ───────────────────
 
 
@@ -388,6 +426,71 @@ def anchor_pages(chunks: list[Chunk], pdf_path: Path | str, window: int = 6) -> 
             chunk.extra["anchor"] = "none"
 
 
+# ── Micro-chunk merge (N13: noise chunks fold into a sibling) ───────────────
+
+
+def _is_image_only(content: str) -> bool:
+    lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+    return bool(lines) and all(_FIGURE.match(ln) for ln in lines)
+
+
+def _merge_micro_chunks(chunks: list[Chunk], hard_cap: int) -> list[Chunk]:
+    """Fold noise text chunks into an adjacent same-heading text chunk (N13).
+
+    A chunk is noise when it is text AND (under MIN_CHUNK_TOKENS or pure
+    image links — the N6 fold has no neighbour at section boundaries).
+    Merge prefers the previous sibling, then the next; never crosses a
+    heading_path boundary, never touches table/figure/code, never exceeds
+    hard_cap. Unmergeable noise survives tagged extra["micro"]. Runs
+    BEFORE anchor_pages so merged content anchors properly (kills the
+    page=None image-only chunks). seq and chunk_id are re-derived — ids
+    stay content-addressed (S6/N1).
+    """
+
+    def is_micro(c: Chunk) -> bool:
+        return c.chunk_type == "text" and (
+            c.token_est < MIN_CHUNK_TOKENS or _is_image_only(c.content)
+        )
+
+    def absorb(host: Chunk, micro: Chunk, *, before: bool) -> bool:
+        if host.chunk_type != "text" or host.heading_path != micro.heading_path:
+            return False
+        if host.token_est + micro.token_est > hard_cap:
+            return False
+        parts = [micro.content, host.content] if before else [host.content, micro.content]
+        host.content = "\n\n".join(parts)
+        host.embed_text = host.content
+        host.token_est = estimate_tokens(host.content)
+        return True
+
+    out: list[Chunk] = []
+    pending: Chunk | None = None  # micro waiting for a forward host
+    for chunk in chunks:
+        if pending is not None:
+            if not absorb(chunk, pending, before=True):
+                pending.extra["micro"] = True
+                out.append(pending)
+            pending = None
+        if is_micro(chunk):
+            if out and absorb(out[-1], chunk, before=False):
+                continue
+            pending = chunk
+            continue
+        out.append(chunk)
+    if pending is not None:
+        pending.extra["micro"] = True
+        out.append(pending)
+
+    dup_counter: dict[tuple[tuple[str, ...], str], int] = {}
+    for i, chunk in enumerate(out):
+        chunk.seq = i
+        key = (tuple(chunk.heading_path), chunk.content)
+        dup = dup_counter.get(key, 0)
+        dup_counter[key] = dup + 1
+        chunk.chunk_id = _make_chunk_id(chunk.doc_id, chunk.heading_path, chunk.content, dup)
+    return out
+
+
 # ── Main assembly ───────────────────────────────────────────────────────────
 
 
@@ -405,6 +508,7 @@ def chunk_markdown(
     """
     body = strip_frontmatter(markdown_text)
     blocks = _parse_blocks(body.splitlines())
+    blocks = _demote_footnote_headings(blocks)
     dropped = _drop_running_headers(blocks)
 
     tracker = _HeadingTracker()
@@ -448,7 +552,12 @@ def chunk_markdown(
         """Heading path + nearest caption line (S2/N2: embed-only context)."""
         parts = [" > ".join(path)] if path else []
         if last_text_block:
-            lines = [ln.strip() for ln in last_text_block.splitlines() if ln.strip()]
+            lines = [
+                ln.strip()
+                for ln in last_text_block.splitlines()
+                # <sup> footnote lines masquerade as captions — skip them
+                if ln.strip() and not ln.strip().startswith("<sup>")
+            ]
             caption = next((ln for ln in reversed(lines) if _CAPTION.match(ln)), "")
             if not caption and lines:
                 caption = lines[-1][:200]
@@ -500,6 +609,8 @@ def chunk_markdown(
             _emit(block.text, "code", path, f"{ctx}\n{block.text}".strip())
 
     flush_text()
+
+    chunks = _merge_micro_chunks(chunks, hard_cap)
 
     if pdf_path is not None:
         anchor_pages(chunks, pdf_path)

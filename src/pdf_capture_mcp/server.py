@@ -661,6 +661,29 @@ _EST_MINUTES_PER_PAGE = 0.4
 _EST_MINUTES_PER_PAGE_SCANNED = 1.5
 
 
+def _derive_title(pdf: Path) -> str:
+    """Human-readable document title: PDF metadata -> filename stem fallback.
+
+    Download artifacts like '2026_Report_050526-4_69f9b41ca0945' make poor
+    titles; the metadata Title field wins when it looks like real prose
+    (has words, sane length, not an authoring-tool source filename).
+    """
+    try:
+        import fitz
+
+        with fitz.open(str(pdf)) as doc:
+            meta = ((doc.metadata or {}).get("title") or "").strip()
+    except Exception:  # noqa: BLE001 — title derivation is best-effort
+        meta = ""
+    looks_like_source_file = meta.lower().endswith(
+        (".doc", ".docx", ".pdf", ".indd", ".qxd", ".pptx", ".tex")
+    )
+    if 4 <= len(meta) <= 200 and not looks_like_source_file:
+        if sum(c.isalpha() for c in meta) >= 4:
+            return meta
+    return pdf.stem
+
+
 def _parse_page_range(page_range: str) -> list[int] | None:
     """Parse a page range string like '0-9' or '0,2,5-7' into 0-based indices."""
     page_range = page_range.strip()
@@ -1358,7 +1381,7 @@ def _run_pipeline(
                     qc_report.setdefault("repairs", []).extend(vars(a) for a in merge_actions)
 
             doc_id = compute_doc_id(pdf)
-            title = pdf.stem
+            title = _derive_title(pdf)
             chunk_result = chunk_markdown(markdown_text, doc_id, pdf_path=pdf)
             summary, summary_source = extract_summary(markdown_text)
             frontmatter = build_frontmatter(
@@ -1422,7 +1445,7 @@ def _run_pipeline(
         or (str(md_path) if md_path.exists() else ""),
         "package": package_info,
         "pipeline_root": str(out_dir),
-        "title": pdf.stem,
+        "title": _derive_title(pdf),
         "engine": eng.name,
         "classification": {
             "doc_type": classification.doc_type,

@@ -148,6 +148,71 @@ def test_page_anchoring_monotonic(two_page_pdf):
     assert chunks[0].extra["anchor"] == "matched"
 
 
+# ── Micro-chunk merge (N13) ─────────────────────────────────────────────────
+
+
+def test_micro_text_chunk_merges_into_previous_sibling():
+    big = "word " * 420  # ~525 tokens: forces a budget flush before the tail
+    md = f"# S\n\n{big.strip()}\n\nTiny tail.\n"
+    chunks = chunk_markdown(md, DOC)["chunks"]
+    assert len(chunks) == 1  # N13: the tail folded back into its sibling
+    assert "Tiny tail." in chunks[0].content
+    assert chunks[0].embed_text == chunks[0].content
+
+
+def test_micro_chunk_never_crosses_heading():
+    md = "# Report\n\n## A\n\nShort a.\n\n## B\n\nShort b.\n"
+    chunks = chunk_markdown(md, DOC)["chunks"]
+    assert len(chunks) == 2  # different heading_path -> no merge
+    assert [c.heading_path for c in chunks] == [["Report", "A"], ["Report", "B"]]
+    assert all(c.extra.get("micro") for c in chunks)  # honest noise tag
+
+
+def test_isolated_bare_image_survives_tagged():
+    md = "# S\n\n![](images/a.jpeg)\n\n# T\n\nReal body text for the next section.\n"
+    chunks = chunk_markdown(md, DOC)["chunks"]
+    img = next(c for c in chunks if "images/a.jpeg" in c.content)
+    assert img.chunk_type == "text"  # N6 fold had no neighbour...
+    assert img.extra.get("micro") is True  # ...so N13 tags it as noise
+
+
+# ── Footnote demotion (N14) ─────────────────────────────────────────────────
+
+
+def test_numeric_h4_demoted_to_footnote_text():
+    md = (
+        "# Intro\n\nBody paragraph with actual content.\n\n"
+        "#### 3\n\nSee the methodology for details.\n"
+    )
+    chunks = chunk_markdown(md, DOC)["chunks"]
+    for c in chunks:
+        assert "3" not in c.heading_path  # no fake ['Intro', '3'] section
+    joined = " ".join(c.content for c in chunks)
+    assert "3. See the methodology for details." in joined  # note survives
+
+
+def test_low_level_numeric_heading_is_not_demoted():
+    md = "# A\n\n## 2\n\nSection two body text here.\n"
+    chunks = chunk_markdown(md, DOC)["chunks"]
+    assert ["A", "2"] in [c.heading_path for c in chunks]  # level < 4: real section
+
+
+# ── Caption context: <sup> footnotes excluded (S2 refinement) ───────────────
+
+
+def test_sup_footnote_line_not_used_as_table_caption():
+    md = (
+        "# S\n\nIntro paragraph with some real content here.\n\n"
+        "<sup>(--)</sup> Additional country data note.\n\n"
+        "| a | b |\n|---|---|\n| 1 | 2 |\n"
+    )
+    chunks = chunk_markdown(md, DOC)["chunks"]
+    table = next(c for c in chunks if c.chunk_type == "table")
+    assert "Additional country data" not in table.embed_text  # not a caption
+    text_all = " ".join(c.content for c in chunks if c.chunk_type == "text")
+    assert "Additional country data" in text_all  # body text is untouched
+
+
 # ── Packaging: naming standard ──────────────────────────────────────────────
 
 
