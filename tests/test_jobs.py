@@ -130,3 +130,110 @@ def test_public_view_is_compact():
         "result",
     }
     assert view["elapsed_seconds"] is not None
+
+
+# ── v0.9.5: locking consistency (W7) + GC (W8) ──────────────────────────────
+
+
+def test_concurrent_stage_updates_never_tear(tmp_path):
+    """W7: hammer update_stage from the worker while polling get_job —
+    readers must always see a consistent snapshot (done implies result)."""
+    from pdf_capture_mcp.jobs import create_job, get_job, update_stage
+
+    def target(job):
+        for i in range(200):
+            update_stage(job, f"stage-{i}", tick=i)
+        return {"final": True}
+
+    job = create_job("hammer", target)
+    saw_done_without_result = False
+    for _ in range(500):
+        snap = get_job(job["job_id"])
+        assert snap is not None
+        if snap["status"] == "done" and snap.get("result") is None:
+            saw_done_without_result = True
+        if snap["status"] == "done":
+            break
+        time.sleep(0.001)
+    finished = _wait_terminal(job["job_id"])
+    assert not saw_done_without_result
+    assert finished["result"] == {"final": True}
+    # get_job returns copies, never the live dict
+    a = get_job(job["job_id"])
+    b = get_job(job["job_id"])
+    assert a == b
+
+
+def _make_stale_file(jobs_dir, name: str, age_s: float) -> None:
+    import os
+
+    p = jobs_dir / f"{name}.json"
+    p.write_text(json.dumps({"job_id": name, "status": "done"}))
+    old = time.time() - age_s
+    os.utime(p, (old, old))
+
+
+def _reset_gc_throttle():
+    import pdf_capture_mcp.jobs as jobs_mod
+
+    jobs_mod._last_gc = 0.0
+
+
+def test_gc_removes_expired_files():
+    from pdf_capture_mcp.jobs import _gc_jobs, _jobs_dir
+
+    _reset_gc_throttle()
+    d = _jobs_dir()
+    _make_stale_file(d, "ancient", 31 * 24 * 3600)
+    _make_stale_file(d, "fresh", 60)
+    _gc_jobs()
+    assert not (d / "ancient.json").exists()
+    assert (d / "fresh.json").exists()
+
+
+def test_gc_enforces_file_cap():
+    import pdf_capture_mcp.jobs as jobs_mod
+    from pdf_capture_mcp.jobs import _gc_jobs, _jobs_dir
+
+    _reset_gc_throttle()
+    d = _jobs_dir()
+    # newest-first retention: create beyond the cap with distinct mtimes
+    original_cap = jobs_mod._GC_MAX_FILES
+    jobs_mod._GC_MAX_FILES = 5
+    try:
+        for i in range(8):
+            _make_stale_file(d, f"j{i:02d}", age_s=(8 - i) * 10)
+        _gc_jobs()
+        remaining = sorted(p.stem for p in d.glob("*.json"))
+        assert len(remaining) == 5
+        assert remaining == [f"j{i:02d}" for i in range(3, 8)]  # newest kept
+    finally:
+        jobs_mod._GC_MAX_FILES = original_cap
+
+
+def test_gc_spares_live_registry_jobs():
+    import pdf_capture_mcp.jobs as jobs_mod
+    from pdf_capture_mcp.jobs import _gc_jobs, _jobs_dir, _lock
+
+    _reset_gc_throttle()
+    d = _jobs_dir()
+    _make_stale_file(d, "live-one", 31 * 24 * 3600)
+    with _lock:
+        jobs_mod._jobs["live-one"] = {"job_id": "live-one", "status": "running"}
+    try:
+        _gc_jobs()
+        assert (d / "live-one.json").exists()  # in-memory job is immune
+    finally:
+        with _lock:
+            jobs_mod._jobs.pop("live-one", None)
+
+
+def test_gc_is_throttled():
+    from pdf_capture_mcp.jobs import _gc_jobs, _jobs_dir
+
+    _reset_gc_throttle()
+    d = _jobs_dir()
+    _gc_jobs()  # arms the throttle
+    _make_stale_file(d, "late-expired", 31 * 24 * 3600)
+    _gc_jobs()  # within the hourly window: must be a no-op
+    assert (d / "late-expired.json").exists()
