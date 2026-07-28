@@ -176,7 +176,7 @@ def _make_stale_file(jobs_dir, name: str, age_s: float) -> None:
 def _reset_gc_throttle():
     import pdf_capture_mcp.jobs as jobs_mod
 
-    jobs_mod._last_gc = 0.0
+    jobs_mod._last_gc = None
 
 
 def test_gc_removes_expired_files():
