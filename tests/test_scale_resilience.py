@@ -295,6 +295,32 @@ def test_real_segment_isolation_timeout(tmp_path):
     assert report is None  # timed out while the child was spawning
 
 
+def test_segment_isolation_timeout_after_ready(tmp_path):
+    """Ready sentinel arrives, then the extraction itself blows the OCR
+    budget — the parent must terminate the child and return None."""
+    import fitz
+
+    pdf = tmp_path / "big.pdf"
+    doc = fitz.open()
+    for _ in range(300):
+        page = doc.new_page()
+        page.insert_text((72, 100), "segment body text " * 20)
+    doc.save(str(pdf))
+    doc.close()
+
+    class _Named:
+        name = "pymupdf"
+
+    report = _run_segment_isolated(
+        _Named(),
+        pdf,
+        tmp_path / "seg_0",
+        {"enable_formula": False, "enable_table": False},
+        timeout_s=0.001,  # sentinel budget is generous; OCR budget is not
+    )
+    assert report is None
+
+
 def test_segment_isolation_child_failure_before_ready(tmp_path):
     """A child that dies before models warm sends its report instead of
     the sentinel — the parent must hand it through, not hang."""
