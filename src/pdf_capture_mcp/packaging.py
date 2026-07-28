@@ -269,6 +269,7 @@ def build_metadata(
     csv_mapping: list[dict[str, Any]],
     dropped_headers: list[str],
     degraded_segments: list[int] | None = None,
+    missing_segments: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     for rel in [main_md_name, "README.md", "data/chunks.jsonl", "data/qc_report.json"]:
@@ -298,6 +299,9 @@ def build_metadata(
         # v0.9.5: fulfil the 0.9.4 contract — degraded segments live in the
         # package metadata too, not only in qc_report.
         "degraded_segments": degraded_segments or [],
+        # v0.10.0: page windows whose content is LOST (OCR failed on
+        # image-only pages) — consumers must treat these as gaps.
+        "missing_segments": missing_segments or [],
     }
 
 

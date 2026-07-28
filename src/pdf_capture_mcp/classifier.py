@@ -28,6 +28,42 @@ _FORMULA_PATTERN = re.compile(
 # Table indicators
 _TABLE_PATTERN = re.compile(r"^\|.+\|$", re.MULTILINE)
 
+# A page carrying fewer extractable characters than this has no usable text
+# layer — same judgement md_audit's MD-201 gate applies to whole documents.
+_SCANNED_PAGE_CHAR_THRESHOLD = 200
+
+
+def detect_text_layer(pdf_path: str | Path, sample_pages: int = 10) -> tuple[bool, float]:
+    """Detect whether a PDF is a scan (image-only, no usable text layer).
+
+    Samples up to ``sample_pages`` pages spread evenly across the document —
+    a first-pages-only sample misjudges digital books with scanned covers
+    and scanned books with digital front matter alike. A page with fewer
+    than 200 extractable characters counts as textless; the document is
+    scanned when >= 80% of sampled pages are textless.
+
+    Returns:
+        (is_scanned, text_layer_coverage) where coverage is the fraction
+        of sampled pages that DO carry a text layer. Best-effort: any read
+        failure returns (False, 1.0) so callers keep the non-scan path.
+    """
+    try:
+        import fitz
+
+        with fitz.open(str(Path(pdf_path))) as doc:
+            n = doc.page_count
+            if n == 0:
+                return False, 1.0
+            k = min(sample_pages, n)
+            idxs = sorted({round(i * (n - 1) / max(k - 1, 1)) for i in range(k)})
+            textless = sum(
+                1 for i in idxs if len(doc[i].get_text().strip()) < _SCANNED_PAGE_CHAR_THRESHOLD
+            )
+            coverage = 1.0 - textless / len(idxs)
+            return textless / len(idxs) >= 0.8, round(coverage, 2)
+    except Exception:  # noqa: BLE001 — detection is best-effort
+        return False, 1.0
+
 
 def classify_document(pdf_path: str | Path) -> ClassifyResult:
     """Classify a PDF document using structural heuristics.
@@ -84,6 +120,10 @@ def classify_document(pdf_path: str | Path) -> ClassifyResult:
         logger.debug("pymupdf not available for content analysis")
     except Exception as exc:
         logger.debug("Content analysis failed: %s", exc)
+
+    # Scanned-document detection (v0.10.0) — drives force-OCR and the
+    # honest-degradation policy downstream.
+    result.is_scanned, result.text_layer_coverage = detect_text_layer(pdf_path)
 
     # ── Scoring ─────────────────────────────────────────────────────────
     scores: dict[str, float] = {}

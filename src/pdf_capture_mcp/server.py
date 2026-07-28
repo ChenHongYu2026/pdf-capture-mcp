@@ -657,6 +657,8 @@ def download_models(engine: str = "marker") -> str:
 ASYNC_PAGE_THRESHOLD = 15
 # Rough marker throughput used only for user-facing ETA hints (min/page).
 _EST_MINUTES_PER_PAGE = 0.4
+# Scanned documents run full-page OCR — far slower (v0.10.0).
+_EST_MINUTES_PER_PAGE_SCANNED = 1.5
 
 
 def _parse_page_range(page_range: str) -> list[int] | None:
@@ -711,17 +713,30 @@ def _quick_page_count(pdf: Path) -> int:
 
 SEGMENT_PAGE_THRESHOLD = 100
 SEGMENT_WINDOW = 80
-SEGMENT_TIMEOUT_S = 1200  # 20 min per 80-page window — generous yet bounded
+# 20 min per 80-page window — generous yet bounded. Env-tunable for slow
+# hosts; scanned documents additionally get a 3x multiplier in the pipeline.
+SEGMENT_TIMEOUT_S = int(os.environ.get("PDF_CAPTURE_SEGMENT_TIMEOUT_S", "1200"))
+# Model-load budget awaited before the OCR clock starts (ready sentinel).
+SEGMENT_READY_TIMEOUT_S = 300
 
 
 def _segment_child(
     engine_name: str, pdf_str: str, seg_dir_str: str, kwargs: dict[str, Any], queue: Any
 ) -> None:
-    """Subprocess entry for one segment (module-level for spawn)."""
+    """Subprocess entry for one segment (module-level for spawn).
+
+    Emits a 'ready' sentinel once the engine models are warm (v0.10.0):
+    every spawned segment reloads marker models from scratch (1-3 min),
+    and on scanned documents that load must not eat the OCR budget.
+    """
     try:
         from pdf_capture_mcp.engines import get_engine
 
         eng = get_engine(engine_name)
+        warmup = getattr(eng, "warmup", None)
+        if callable(warmup):
+            warmup()
+        queue.put("ready")
         queue.put(eng.extract(Path(pdf_str), Path(seg_dir_str), **kwargs))
     except Exception as exc:  # noqa: BLE001 — child must always report
         from pdf_capture_mcp.types import ExtractReport
@@ -730,9 +745,18 @@ def _segment_child(
 
 
 def _run_segment_isolated(
-    eng: Any, pdf: Path, seg_dir: Path, kwargs: dict[str, Any], timeout_s: float
+    eng: Any,
+    pdf: Path,
+    seg_dir: Path,
+    kwargs: dict[str, Any],
+    timeout_s: float,
+    ready_timeout_s: float = SEGMENT_READY_TIMEOUT_S,
 ) -> Any:
     """Run one segment extraction in a subprocess with a hard timeout.
+
+    Two-phase wait (v0.10.0): a fixed model-load budget for the child's
+    'ready' sentinel first, then `timeout_s` for the extraction itself —
+    spawned model loading never eats the segment's OCR budget.
 
     Returns the ExtractReport, or None on timeout (245-page regression:
     a single ultra-dense page can wedge the OCR service mid-segment —
@@ -752,7 +776,10 @@ def _run_segment_isolated(
     )
     proc.start()
     try:
-        report = q.get(timeout=timeout_s)
+        first = q.get(timeout=ready_timeout_s)
+        # A child that fails before models are warm sends its report
+        # directly instead of the sentinel.
+        report = q.get(timeout=timeout_s) if first == "ready" else first
         proc.join(30)
         return report
     except queue_mod.Empty:
@@ -765,6 +792,25 @@ def _run_segment_isolated(
         q.close()
 
 
+def _window_text_chars_per_page(pdf: Path, start: int, end: int) -> float:
+    """Average extractable characters per page inside a page window.
+
+    Best-effort: on any read failure assume a healthy text layer so the
+    caller keeps the legacy pymupdf-degradation path.
+    """
+    try:
+        import fitz
+
+        with fitz.open(str(pdf)) as doc:
+            n, chars = 0, 0
+            for i in range(start, min(end + 1, doc.page_count)):
+                chars += len(doc[i].get_text().strip())
+                n += 1
+            return chars / max(n, 1)
+    except Exception:  # noqa: BLE001 — probe is best-effort
+        return float("inf")
+
+
 def _extract_segmented(
     eng: Any,
     pdf: Path,
@@ -774,20 +820,37 @@ def _extract_segmented(
     enable_formula: bool,
     stage_cb: Any,
     segment_timeout_s: float = SEGMENT_TIMEOUT_S,
+    force_ocr: bool = False,
     _runner: Any = None,
     _fallback: Any = None,
 ) -> Any:
     """Extract an oversized PDF in page windows and merge the segments.
 
     Per segment: subprocess with a hard timeout (v0.9.4) -> on timeout or
-    failure, restart inference services and retry once -> still failing,
-    DEGRADE HONESTLY to the pymupdf text-layer engine for that segment
-    (content preserved in seconds, layout fidelity reduced) and record it
-    in metadata['degraded_segments']. A whole document never dies because
-    of one ultra-dense page anymore.
+    failure, restart inference services and retry once -> still failing:
+
+    * window HAS a text layer -> DEGRADE HONESTLY to the pymupdf engine
+      (content preserved, layout fidelity reduced) and record it in
+      metadata['degraded_segments']. A near-empty fallback product
+      (<50 chars/page) is never accepted as a degradation — it becomes a
+      missing window instead (v0.10.0: empty text must not impersonate
+      preserved content).
+    * window has NO text layer (scanned document, v0.10.0) -> pymupdf
+      cannot rescue image-only pages, so the window is split in half and
+      each half retried once; halves that still fail are recorded in
+      metadata['missing_segments'] with an explicit placeholder block in
+      the markdown. Loss is always visible, never silent.
+
+    Checkpoints (v0.10.0): each successfully merged segment persists its
+    rewritten markdown plus a .seg_meta.json (kwargs hash); re-running the
+    same out_dir after an interruption reuses finished segments instead of
+    re-OCRing them. Segment dirs are cleaned up only after the full merge
+    succeeds.
 
     _runner/_fallback are injectable for tests.
     """
+    import hashlib
+    import json as json_mod
     import math
     import shutil
 
@@ -800,29 +863,110 @@ def _extract_segmented(
     n_seg = math.ceil(total_pages / SEGMENT_WINDOW)
     md_parts: list[str] = []
     degraded: list[int] = []
+    missing: list[dict[str, Any]] = []
+    finished_dirs: list[Path] = []
     image_count, elapsed = 0, 0.0
+
+    def _kwargs_hash(kwargs: dict[str, Any]) -> str:
+        return hashlib.sha1(
+            json_mod.dumps(kwargs, sort_keys=True, default=str).encode()
+        ).hexdigest()[:16]
+
+    def _reuse_checkpoint(seg_dir: Path, khash: str) -> dict[str, Any] | None:
+        meta_p = seg_dir / ".seg_meta.json"
+        md_p = seg_dir / "full_text.md"
+        if not (meta_p.exists() and md_p.exists()):
+            return None
+        try:
+            meta = json_mod.loads(meta_p.read_text(encoding="utf-8"))
+        except Exception:  # noqa: BLE001 — corrupt checkpoint: rebuild
+            return None
+        if meta.get("kwargs_hash") != khash:
+            return None
+        return dict(meta)
+
+    def _merge_segment(prefix: str, seg_dir: Path, report: Any, khash: str) -> None:
+        """Move images under a unique prefix, rewrite refs, checkpoint."""
+        nonlocal image_count, elapsed
+        text = Path(report.full_text_md).read_text(encoding="utf-8", errors="replace")
+        seg_images = seg_dir / "images"
+        if seg_images.is_dir():
+            for img in sorted(seg_images.iterdir()):
+                new_name = f"{prefix}_{img.name}"
+                shutil.move(str(img), str(images_dir / new_name))
+                text = text.replace(f"images/{img.name}", f"images/{new_name}")
+        # Persist the rewritten text so the checkpoint is self-consistent
+        # (its images already live in the shared images/ dir).
+        (seg_dir / "full_text.md").write_text(text, encoding="utf-8")
+        (seg_dir / ".seg_meta.json").write_text(
+            json_mod.dumps(
+                {
+                    "kwargs_hash": khash,
+                    "engine": report.engine,
+                    "image_count": report.image_count,
+                    "elapsed_seconds": report.elapsed_seconds,
+                }
+            ),
+            encoding="utf-8",
+        )
+        md_parts.append(text.strip())
+        image_count += report.image_count
+        elapsed += report.elapsed_seconds
+        finished_dirs.append(seg_dir)
+
+    def _attempt(seg_dir: Path, kwargs: dict[str, Any]) -> Any:
+        """One runner attempt + one hygiene-restart retry."""
+        report = runner(eng, pdf, seg_dir, kwargs, segment_timeout_s)
+        if report is None or not report.ok:
+            restart_inference_services()
+            shutil.rmtree(seg_dir, ignore_errors=True)
+            report = runner(eng, pdf, seg_dir, kwargs, segment_timeout_s)
+        return report
+
+    def _window_kwargs(start: int, end: int) -> dict[str, Any]:
+        kw: dict[str, Any] = {
+            "enable_formula": enable_formula,
+            "enable_table": True,
+            "pages": list(range(start, end + 1)),
+            "page_range": f"{start}-{end}",
+        }
+        if force_ocr:
+            kw["force_ocr"] = True
+        return kw
 
     for k, seg_start in enumerate(range(0, total_pages, SEGMENT_WINDOW)):
         seg_end = min(seg_start + SEGMENT_WINDOW, total_pages) - 1
-        stage_cb(f"extracting segment {k + 1}/{n_seg} (pages {seg_start + 1}-{seg_end + 1})")
         seg_dir = extraction_dir / f"seg_{k}"
-        seg_kwargs = {
-            "enable_formula": enable_formula,
-            "enable_table": True,
-            "pages": list(range(seg_start, seg_end + 1)),
-            "page_range": f"{seg_start}-{seg_end}",
-        }
-        report = runner(eng, pdf, seg_dir, seg_kwargs, segment_timeout_s)
-        if report is None or not report.ok:
-            # Service hygiene, then one retry inside a fresh subprocess.
-            restart_inference_services()
-            shutil.rmtree(seg_dir, ignore_errors=True)
-            report = runner(eng, pdf, seg_dir, seg_kwargs, segment_timeout_s)
-        if report is None or not report.ok:
-            # Honest degradation: the text layer is always reachable.
+        seg_kwargs = _window_kwargs(seg_start, seg_end)
+        khash = _kwargs_hash(seg_kwargs)
+
+        ckpt = _reuse_checkpoint(seg_dir, khash)
+        if ckpt is not None:
+            stage_cb(f"segment {k + 1}/{n_seg}: reusing checkpoint")
+            md_parts.append(
+                (seg_dir / "full_text.md").read_text(encoding="utf-8", errors="replace").strip()
+            )
+            image_count += int(ckpt.get("image_count", 0))
+            elapsed += float(ckpt.get("elapsed_seconds", 0.0))
+            finished_dirs.append(seg_dir)
+            continue
+        shutil.rmtree(seg_dir, ignore_errors=True)  # stale/mismatched checkpoint
+
+        stage_cb(f"extracting segment {k + 1}/{n_seg} (pages {seg_start + 1}-{seg_end + 1})")
+        report = _attempt(seg_dir, seg_kwargs)
+        if report is not None and report.ok:
+            _merge_segment(f"s{k}", seg_dir, report, khash)
+            continue
+
+        # Both attempts failed. Choose the honest path for this window.
+        restart_inference_services()
+        shutil.rmtree(seg_dir, ignore_errors=True)
+        window_pages = seg_end - seg_start + 1
+        has_text_layer = _window_text_chars_per_page(pdf, seg_start, seg_end) >= 200
+
+        if has_text_layer:
+            # Text-layer degradation (v0.9.4 path).
             stage_cb(f"segment {k + 1}/{n_seg}: degrading to text-layer engine")
-            restart_inference_services()
-            shutil.rmtree(seg_dir, ignore_errors=True)
             if _fallback is not None:
                 fallback_eng = _fallback
             else:
@@ -842,27 +986,56 @@ def _extract_segmented(
                     f"failed even in degraded mode: {report.error}"
                 )
                 return report
+            # Cheap guard (v0.10.0): a near-empty product is loss, not a
+            # degradation — never let it impersonate preserved content.
+            fb_text = Path(report.full_text_md).read_text(encoding="utf-8", errors="replace")
+            if len(fb_text.strip()) / max(window_pages, 1) < 50:
+                shutil.rmtree(seg_dir, ignore_errors=True)
+                missing.append({"segment": k + 1, "pages": [seg_start + 1, seg_end + 1]})
+                md_parts.append(
+                    f"> [WARNING] Pages {seg_start + 1}-{seg_end + 1}: extraction "
+                    "failed and the fallback produced no content; "
+                    "content NOT captured."
+                )
+                continue
+            _merge_segment(f"s{k}", seg_dir, report, khash)
             degraded.append(k + 1)
+            continue
 
-        text = Path(report.full_text_md).read_text(encoding="utf-8", errors="replace")
-        seg_images = seg_dir / "images"
-        if seg_images.is_dir():
-            for img in sorted(seg_images.iterdir()):
-                new_name = f"s{k}_{img.name}"
-                shutil.move(str(img), str(images_dir / new_name))
-                text = text.replace(f"images/{img.name}", f"images/{new_name}")
-        md_parts.append(text.strip())
-        image_count += report.image_count
-        elapsed += report.elapsed_seconds
-        shutil.rmtree(seg_dir, ignore_errors=True)
+        # Scanned window (v0.10.0): pymupdf cannot rescue image-only pages.
+        # Halve the window and retry each half once; report what still fails.
+        stage_cb(f"segment {k + 1}/{n_seg}: no text layer — half-window OCR retry")
+        mid = (seg_start + seg_end) // 2
+        halves = [(seg_start, mid)]
+        if mid + 1 <= seg_end:
+            halves.append((mid + 1, seg_end))
+        for j, (h_start, h_end) in enumerate(halves):
+            h_dir = extraction_dir / f"seg_{k}_h{j}"
+            shutil.rmtree(h_dir, ignore_errors=True)
+            h_kwargs = _window_kwargs(h_start, h_end)
+            h_report = runner(eng, pdf, h_dir, h_kwargs, segment_timeout_s)
+            if h_report is not None and h_report.ok:
+                _merge_segment(f"s{k}h{j}", h_dir, h_report, _kwargs_hash(h_kwargs))
+            else:
+                restart_inference_services()
+                shutil.rmtree(h_dir, ignore_errors=True)
+                missing.append({"segment": k + 1, "pages": [h_start + 1, h_end + 1]})
+                md_parts.append(
+                    f"> [WARNING] Pages {h_start + 1}-{h_end + 1}: OCR failed and "
+                    "no text layer exists; content NOT captured."
+                )
 
     md_path = extraction_dir / "full_text.md"
     md_path.write_text("\n\n".join(md_parts) + "\n", encoding="utf-8")
+    # Merge complete: checkpoints have served their purpose.
+    for d in finished_dirs:
+        shutil.rmtree(d, ignore_errors=True)
     logger.info(
-        "Segmented extraction merged: %d segments, %d pages, %d degraded",
+        "Segmented extraction merged: %d segments, %d pages, %d degraded, %d missing windows",
         n_seg,
         total_pages,
         len(degraded),
+        len(missing),
     )
     return ExtractReport(
         ok=True,
@@ -876,6 +1049,7 @@ def _extract_segmented(
             "segments": n_seg,
             "segment_window": SEGMENT_WINDOW,
             "degraded_segments": degraded,
+            "missing_segments": missing,
         },
     )
 
@@ -976,6 +1150,10 @@ def _run_pipeline(
 
     _stage("extracting")
     total_pages = _quick_page_count(pdf)
+    # Scanned documents (v0.10.0): force OCR on every page and triple the
+    # per-segment budget — full-page OCR runs far slower than text-layer
+    # assisted extraction.
+    force_ocr = bool(classification.is_scanned)
     if pages is None and total_pages > SEGMENT_PAGE_THRESHOLD:
         # Oversized document: windowed extraction (v0.9.3)
         extract_report = _extract_segmented(
@@ -985,6 +1163,8 @@ def _run_pipeline(
             total_pages,
             enable_formula=enable_formula,
             stage_cb=_stage,
+            segment_timeout_s=SEGMENT_TIMEOUT_S * (3 if force_ocr else 1),
+            force_ocr=force_ocr,
         )
     else:
         extract_kwargs: dict[str, Any] = {}
@@ -992,6 +1172,8 @@ def _run_pipeline(
             # marker expects a range string; pymupdf expects a list of indices.
             extract_kwargs["pages"] = pages
             extract_kwargs["page_range"] = ",".join(str(p) for p in pages)
+        if force_ocr:
+            extract_kwargs["force_ocr"] = True
         extract_report = eng.extract(
             pdf,
             extraction_dir,
@@ -1026,6 +1208,7 @@ def _run_pipeline(
     # Hoisted out of the QC block (v0.9.5): with skip_qc=True the degraded
     # info was silently lost from the package metadata.
     degraded_segments = extract_report.metadata.get("degraded_segments") or []
+    missing_segments = extract_report.metadata.get("missing_segments") or []
     qc_verdict = "PASS"
     qc_report: dict[str, Any] = {}
     if not skip_qc and markdown_text:
@@ -1110,8 +1293,9 @@ def _run_pipeline(
 
         # Degraded segments (v0.9.4): part of the document was extracted by
         # the text-layer fallback — content preserved, layout fidelity
-        # reduced. Never let that pass silently.
-        if degraded_segments and qc_verdict == "PASS":
+        # reduced. Missing windows (v0.10.0): OCR failed on image-only
+        # pages — content LOST. Never let either pass silently.
+        if (degraded_segments or missing_segments) and qc_verdict == "PASS":
             qc_verdict = "WARN"
 
         qc_report = {
@@ -1119,12 +1303,20 @@ def _run_pipeline(
             "dimensions": gate.dimensions,
             "audit_counts": audit_counts,
             "degraded_segments": degraded_segments,
+            "missing_segments": missing_segments,
             # Plain dicts so both MCP JSON responses and persisted job state
             # serialize cleanly.
             "audit_fixes": [vars(f) for f in audit["fixes"]],
             "audit_issues": [vars(i) for i in audit_issues],
             "repairs": repair_actions,
         }
+        if classification.is_scanned:
+            # Blindness made explicit (v0.10.0): these checks need a text
+            # layer and silently no-op on scans — say so instead.
+            qc_report["notes"] = [
+                "text layer unavailable (scanned document): MD-201/MD-202 "
+                "coverage checks and VLM table repair are not applicable"
+            ]
     elif not markdown_text:
         qc_verdict = "HALT"
 
@@ -1216,6 +1408,7 @@ def _run_pipeline(
                     "heading_tree": build_heading_tree(markdown_text),
                     "dropped_headers": chunk_result["dropped_headers"],
                     "degraded_segments": degraded_segments,
+                    "missing_segments": missing_segments,
                 },
             )
         except Exception as exc:  # noqa: BLE001 — packaging must not kill conversion
@@ -1237,6 +1430,8 @@ def _run_pipeline(
             "source": classification.source,
             "has_formulas": classification.has_formulas,
             "has_tables": classification.has_tables,
+            "is_scanned": classification.is_scanned,
+            "text_layer_coverage": classification.text_layer_coverage,
         },
         "page_count": extract_report.page_count,
         "table_count": table_count,
@@ -1246,6 +1441,16 @@ def _run_pipeline(
         "elapsed_seconds": extract_report.elapsed_seconds,
         "vlm_notice": vlm_notice,
         "features": features,
+        "missing_segments": missing_segments,
+        **(
+            {
+                "warning": "Content NOT captured for pages: "
+                + ", ".join(f"{m['pages'][0]}-{m['pages'][1]}" for m in missing_segments)
+                + " (OCR failed, no text layer to fall back on)."
+            }
+            if missing_segments
+            else {}
+        ),
     }
 
 
@@ -1396,7 +1601,17 @@ def pdf_to_markdown(
             _target,
             params={"pdf_path": str(pdf), "engine": engine, "out_dir": out_dir},
         )
-        estimated = max(1, round(effective_pages * _EST_MINUTES_PER_PAGE))
+        # Scanned documents run full-page OCR: honest ETA (v0.10.0).
+        from pdf_capture_mcp.classifier import detect_text_layer
+
+        is_scanned, _cov = detect_text_layer(pdf)
+        rate = _EST_MINUTES_PER_PAGE_SCANNED if is_scanned else _EST_MINUTES_PER_PAGE
+        estimated = max(1, round(effective_pages * rate))
+        scan_note = (
+            f"Scanned document detected: full-OCR path, expect ~{estimated / 60:.1f} h. "
+            if is_scanned
+            else ""
+        )
         return _json(
             {
                 "ok": True,
@@ -1405,9 +1620,11 @@ def pdf_to_markdown(
                 "status": job["status"],
                 "page_count": effective_pages,
                 "estimated_minutes": estimated,
+                "is_scanned": is_scanned,
                 "result_path": str(Path(out_dir) / "extraction" / "full_text.md"),
                 "hint": (
                     f"Conversion started in the background (~{estimated} min). "
+                    f"{scan_note}"
                     f"Poll with get_job_status(job_id='{job['job_id']}'). "
                     "Note: result_path is the RAW intermediate markdown; with "
                     "package=True the final document is at the job result's "
@@ -1706,6 +1923,7 @@ def batch_convert(
         def _target(job: dict[str, Any]) -> dict[str, Any]:
             import json as _json_mod
 
+            from pdf_capture_mcp.classifier import detect_text_layer
             from pdf_capture_mcp.packaging import compute_doc_id, export_package_to_vault
 
             # Existing doc_ids in out_dir (content-addressed dedup)
@@ -1728,6 +1946,15 @@ def batch_convert(
                         entry.update(skipped=True, package_dir=known[doc_id])
                         results.append(entry)
                         continue
+                    # Scanned files run full-page OCR — a fixed 40-min
+                    # breaker would kill every large scan (v0.10.0).
+                    timeout_s = per_file_timeout_minutes * 60.0
+                    is_scanned, _cov = detect_text_layer(pdf)
+                    if is_scanned:
+                        n_pages = _quick_page_count(pdf)
+                        timeout_s = max(timeout_s, n_pages * 90.0)
+                        entry["scanned"] = True
+                        entry["timeout_minutes"] = round(timeout_s / 60)
                     result = _run_pipeline_isolated(
                         pdf,
                         {
@@ -1736,7 +1963,7 @@ def batch_convert(
                             "out_dir": out_dir,
                             "package": True,
                         },
-                        timeout_s=per_file_timeout_minutes * 60,
+                        timeout_s=timeout_s,
                     )
                     entry["ok"] = bool(result.get("ok"))
                     if result.get("timed_out"):
@@ -1979,13 +2206,15 @@ def pdf_info(pdf_path: str) -> str:
             info["has_text_layer"] = text_chars > 50
             info["avg_chars_per_page"] = text_chars // max(sample_pages, 1)
 
-            # Scanned detection
-            low_text_pages = sum(
-                1 for i in range(min(5, doc.page_count)) if len(doc[i].get_text().strip()) < 200
-            )
-            info["is_scanned"] = low_text_pages == min(5, doc.page_count)
-
             doc.close()
+
+            # Scanned detection — the same detector the pipeline consumes
+            # (classifier.detect_text_layer, v0.10.0), evenly sampled.
+            from pdf_capture_mcp.classifier import detect_text_layer
+
+            is_scanned, coverage = detect_text_layer(pdf)
+            info["is_scanned"] = is_scanned
+            info["text_layer_coverage"] = coverage
         except ImportError:
             info["page_count"] = -1
             info["has_text_layer"] = None
