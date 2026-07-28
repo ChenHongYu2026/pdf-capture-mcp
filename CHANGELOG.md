@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-07-28
+
+Audit release: a full-codebase three-perspective review (completeness /
+correctness / impact) at v0.9.4 surfaced 13 findings plus 2 discovered
+during planning. All fixed here; default behavior is preserved except
+where noted.
+
+### Security
+
+- `restart_inference_services` no longer runs a system-wide `pkill -f`:
+  kills are restricted to the CURRENT USER and patterns are anchored to
+  our own venv/cache paths, with a user-scoped broad fallback only on
+  zero match — unrelated processes (e.g. your own llama-server) are never
+  touched.
+
+### Fixed
+
+- `metadata.json` now records `degraded_segments`, fulfilling the 0.9.4
+  contract (previously only qc_report had it); also fixed a latent bug
+  where `skip_qc=True` dropped the degradation info entirely.
+- MD-106 fix counts placeholders BEFORE replacing (was always reporting
+  the line count, undercounting multi-per-line cells).
+- Job state mutations are lock-protected with snapshots persisted outside
+  the lock; `get_job` returns consistent copies (no more torn reads).
+- Qdrant embedded client is a process-wide singleton — fixes
+  "already accessed by another instance" when batch indexing runs
+  concurrently with search_corpus.
+- Thread-safe VLM rate limiting (reserve-slot: concurrent callers space
+  out without serializing HTTP requests).
+
+### Changed
+
+- `export_to_obsidian` / `export_package_to_vault`: a DIVERGED vault copy
+  (hand-edited or unreadable metadata) is refused with `conflict=True`
+  instead of silently overwritten; pass `overwrite=True` to replace.
+  batch_convert records `vault_conflict` per file.
+- qc_gate table coverage now uses the shared table-block parser instead
+  of the row-count/3 heuristic — scores are more accurate; historical
+  WARN judgments may calibrate (WARN dimension only, never HALT).
+- `enable_tatr` is documented as a deprecated no-op (use
+  extract_tables(strategy='tatr')); a warning is logged when passed.
+- Removed the never-wired `processors/layout.py` and the "layout
+  cleaning" pipeline claim from docs (its role is covered by the
+  chunker's running-header filter).
+- Embedding config unified into the shared cache dir (honors
+  PDF_CAPTURE_CACHE_DIR); existing config at ~/.pdf_capture_mcp/ is
+  lazily COPIED (never deleted) on first read.
+- Persisted job files are garbage-collected (30 days / 500 newest,
+  throttled hourly); README tool count corrected to 14.
+
 ## [0.9.4] - 2026-07-28
 
 Fourth pilot forensic finding, structural fix. The 245-page regression

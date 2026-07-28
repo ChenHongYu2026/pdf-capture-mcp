@@ -152,7 +152,8 @@ def test_build_rejects_non_package(rag_env, tmp_path):
 
 def test_embedding_config_roundtrip(monkeypatch, tmp_path):
     """setup_embedding validates via a real call — mock the HTTP layer."""
-    monkeypatch.setattr(embedding_client, "_CONFIG_PATH", tmp_path / "emb.json")
+    monkeypatch.setattr(embedding_client, "_config_path", lambda: tmp_path / "emb.json")
+    monkeypatch.setattr(embedding_client, "_LEGACY_CONFIG_PATH", tmp_path / "legacy.json")
     monkeypatch.setattr(embedding_client, "_post_embeddings", lambda *a, **k: [[0.1] * 1536])
     r = embedding_client.setup_embedding("embo-01", "sk-test", "https://api.minimaxi.com/v1")
     assert r["ok"] and r["dimensions"] == 1536
@@ -161,3 +162,43 @@ def test_embedding_config_roundtrip(monkeypatch, tmp_path):
     assert "api_key" not in info  # never exposed
     assert embedding_client.disable_embedding()["ok"]
     assert not embedding_client.is_embedding_enabled()
+
+
+# ── v0.9.5: config migration + qdrant singleton ─────────────────────────────
+
+
+def test_embedding_config_lazy_migration(monkeypatch, tmp_path):
+    """Legacy config is COPIED (never moved) to the unified cache path."""
+    import json as _json
+
+    legacy = tmp_path / "legacy.json"
+    legacy.write_text(_json.dumps({"enabled": True, "model": "embo-01", "api_key": "k"}))
+    new = tmp_path / "cache" / "embedding_config.json"
+    monkeypatch.setattr(embedding_client, "_config_path", lambda: new)
+    monkeypatch.setattr(embedding_client, "_LEGACY_CONFIG_PATH", legacy)
+
+    cfg = embedding_client._load_config()
+    assert cfg["model"] == "embo-01"
+    assert new.exists()  # migrated
+    assert legacy.exists()  # original untouched
+
+
+def test_qdrant_client_singleton(monkeypatch):
+    """v0.9.5: repeated _get_client() calls share one embedded instance."""
+    import pdf_capture_mcp.rag_store as rs
+
+    created = []
+
+    class _FakeQC:
+        def __init__(self, **kw):
+            created.append(kw)
+
+    monkeypatch.setattr(rs, "_client", None)
+    import qdrant_client
+
+    monkeypatch.setattr(qdrant_client, "QdrantClient", _FakeQC)
+    monkeypatch.setenv("PDF_CAPTURE_QDRANT_URL", "http://localhost:6333")
+    c1 = rs._get_client()
+    c2 = rs._get_client()
+    assert c1 is c2 and len(created) == 1
+    monkeypatch.setattr(rs, "_client", None)  # reset for other tests

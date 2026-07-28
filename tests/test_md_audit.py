@@ -399,3 +399,14 @@ def test_md109_wired_into_orchestrator(tmp_path):
     assert result["modified"] is True
     assert "![](images/fig.jpeg)" in result["text"]
     assert any(f.rule == "MD-109" for f in result["fixes"])
+
+
+def test_md106_counts_all_spans_before_replace():
+    """v0.9.5: two placeholders on one line must be reported as 2, not 1."""
+    from pdf_capture_mcp.quality.md_audit import sanitize_markdown
+
+    text = "| a | <span></span> | <span></span> |\n"
+    cleaned, fixes = sanitize_markdown(text)
+    md106 = [f for f in fixes if f.rule == "MD-106"]
+    assert md106 and "Removed 2 empty" in md106[0].message
+    assert "<span></span>" not in cleaned

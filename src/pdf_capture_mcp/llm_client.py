@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ _MAX_RETRIES = 2
 _BASE_DELAY = 2.0
 
 _last_call_ts: float = 0.0
+_rate_lock = threading.Lock()
 
 # 1x1 transparent PNG used to probe a model's vision capability
 _TEST_IMAGE_B64 = (
@@ -344,11 +346,15 @@ def call_vlm(
     api_base = config.get("api_base", "https://api.openai.com/v1").rstrip("/")
     model = config["model"]
 
-    # Rate limiting
-    now = time.monotonic()
-    elapsed = now - _last_call_ts
-    if elapsed < _RATE_LIMIT_INTERVAL:
-        time.sleep(_RATE_LIMIT_INTERVAL - elapsed)
+    # Rate limiting — reserve-slot pattern (v0.9.5): the lock only computes
+    # and reserves the next slot; sleeping and the HTTP call happen OUTSIDE
+    # so concurrent VLM callers space out without serializing requests.
+    with _rate_lock:
+        now = time.monotonic()
+        wait = max(0.0, _last_call_ts + _RATE_LIMIT_INTERVAL - now)
+        _last_call_ts = now + wait
+    if wait > 0:
+        time.sleep(wait)
 
     import urllib.request
 
@@ -373,7 +379,6 @@ def call_vlm(
 
     for attempt in range(_MAX_RETRIES):
         try:
-            _last_call_ts = time.monotonic()
             req = urllib.request.Request(
                 f"{api_base}/chat/completions",
                 data=payload,

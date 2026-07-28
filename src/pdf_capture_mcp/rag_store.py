@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 import uuid
 from pathlib import Path
 from typing import Any
@@ -40,23 +41,39 @@ def _default_store_path() -> Path:
     return Path(root) / "vector_store"
 
 
+_client: Any = None
+_client_lock = threading.Lock()
+
+
 def _get_client() -> Any:
     """Embedded local client by default; PDF_CAPTURE_QDRANT_URL switches to a
-    server deployment with the same API (the enterprise upgrade path)."""
-    try:
-        from qdrant_client import QdrantClient
-    except ImportError as exc:  # pragma: no cover - guarded by callers
-        raise RuntimeError(
-            "qdrant-client is not installed. Install the RAG extra: "
-            "pip install 'pdf-capture-mcp[rag]'"
-        ) from exc
+    server deployment with the same API (the enterprise upgrade path).
 
-    url = os.environ.get("PDF_CAPTURE_QDRANT_URL", "").strip()
-    if url:
-        return QdrantClient(url=url)
-    path = _default_store_path()
-    path.mkdir(parents=True, exist_ok=True)
-    return QdrantClient(path=str(path))
+    Singleton (v0.9.5): qdrant local mode allows ONE instance per path per
+    process — constructing a client per call made batch_convert(index=True)
+    collide with concurrent search_corpus ("already accessed by another
+    instance").
+    """
+    global _client
+    with _client_lock:
+        if _client is not None:
+            return _client
+        try:
+            from qdrant_client import QdrantClient
+        except ImportError as exc:  # pragma: no cover - guarded by callers
+            raise RuntimeError(
+                "qdrant-client is not installed. Install the RAG extra: "
+                "pip install 'pdf-capture-mcp[rag]'"
+            ) from exc
+
+        url = os.environ.get("PDF_CAPTURE_QDRANT_URL", "").strip()
+        if url:
+            _client = QdrantClient(url=url)
+        else:
+            path = _default_store_path()
+            path.mkdir(parents=True, exist_ok=True)
+            _client = QdrantClient(path=str(path))
+        return _client
 
 
 def _point_id(chunk_id: str) -> str:
