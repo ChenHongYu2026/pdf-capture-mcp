@@ -292,6 +292,26 @@ pdf-capture-mcp setup-mineru   # requires Python 3.11 on PATH
 
 Models (~2GB) auto-download from ModelScope on first extraction.
 
+### Scanned PDFs
+
+Image-only scans are detected automatically (`is_scanned` in `pdf_info` and
+conversion responses): every page is force-OCRed, segment budgets triple,
+and page windows that still fail OCR are reported in `missing_segments`
+with explicit placeholders — loss is always visible, never silent.
+Interrupted multi-hour jobs resume from finished segment checkpoints when
+re-run with the same out_dir.
+
+For very large scans (hundreds of pages), probe your machine's OCR
+throughput first, then submit the full document:
+
+```
+pdf_to_markdown(pdf_path="book.pdf", page_range="0-19")  # ~20-page probe
+```
+
+Expect roughly 1.5 min/page on Apple Silicon for full-page OCR — a
+900-page scan is an overnight job (the async job has no timeout and
+survives via checkpoints).
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -585,6 +605,22 @@ pdf-capture-mcp setup-mineru   # 需要 PATH 中有 Python 3.11
 ```
 
 首次提取时会从 ModelScope 自动下载模型（约 2GB）。
+
+### 扫描件 PDF
+
+纯图片扫描件会被自动识别（`pdf_info` 与转换响应中的 `is_scanned`）：全页强制
+OCR、段预算自动 3 倍；OCR 仍失败的页窗记入 `missing_segments` 并在正文插入
+显式占位标记——内容丢失永远可见、绝不静默。多小时任务中断后，用同一
+out_dir 重跑即可从已完成段的检查点续传。
+
+超大扫描件（数百页）建议先实测本机 OCR 吞吐，再提交全量：
+
+```
+pdf_to_markdown(pdf_path="book.pdf", page_range="0-19")  # 约 20 页预检
+```
+
+Apple Silicon 上全页 OCR 约 1.5 分钟/页——900 页扫描件是一个通宵级任务
+（异步 job 无超时，检查点保证可中断恢复）。
 
 ## 环境变量
 

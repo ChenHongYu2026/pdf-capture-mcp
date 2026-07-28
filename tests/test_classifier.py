@@ -64,3 +64,23 @@ def test_classify_document_carries_scan_fields(tmp_path):
     assert result.text_layer_coverage == 0.0
     digital = classify_document(_pdf(tmp_path / "d.pdf", 8, 0))
     assert digital.is_scanned is False
+
+
+def test_pdf_info_reuses_the_same_detector(tmp_path):
+    """pdf_info and the pipeline must share one source of truth."""
+    import asyncio
+    import json
+
+    from pdf_capture_mcp.server import mcp
+
+    pdf = _pdf(tmp_path / "scan.pdf", 0, 12)
+    expected = detect_text_layer(pdf)
+
+    async def _call():
+        return await mcp.call_tool("pdf_info", {"pdf_path": str(pdf)})
+
+    res = asyncio.run(_call())
+    payload = json.loads(res.content[0].text)  # FastMCP ToolResult
+    assert payload["ok"] is True
+    assert (payload["is_scanned"], payload["text_layer_coverage"]) == expected
+    assert payload["is_scanned"] is True
