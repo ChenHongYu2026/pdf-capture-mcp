@@ -28,7 +28,7 @@ TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED)
 # In-memory registry (fast path); JSON files are the durable source of truth.
 _jobs: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
-_last_gc: float = 0.0
+_last_gc: float | None = None  # None = never ran (monotonic origin is undefined)
 
 # GC policy (v0.9.5): job files are historical records, not an archive.
 _GC_MAX_AGE_S = 30 * 24 * 3600  # 30 days
@@ -57,7 +57,11 @@ def _gc_jobs() -> None:
     global _last_gc
     now = time.monotonic()
     with _lock:
-        if now - _last_gc < _GC_MIN_INTERVAL_S:
+        # Sentinel must be None, not 0.0: time.monotonic() starts at an
+        # UNDEFINED origin (boot time on Linux) — on a freshly booted CI
+        # container `now - 0.0` is under the interval and GC was silently
+        # skipped (found by the v0.9.5 spec-completion CI run).
+        if _last_gc is not None and now - _last_gc < _GC_MIN_INTERVAL_S:
             return
         _last_gc = now
         live_ids = set(_jobs)
