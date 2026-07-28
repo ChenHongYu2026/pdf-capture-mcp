@@ -1329,6 +1329,9 @@ def pdf_to_markdown(
     Returns:
         JSON with markdown_text (sync) or job_id + polling hint (async).
         Always includes `features` describing which deep capabilities ran.
+        Async note: `result_path` points at the RAW intermediate markdown;
+        with package=True the final document is the job result's
+        `markdown_path` inside the <slug>/ knowledge package.
     """
     try:
         if enable_tatr:
