@@ -28,6 +28,57 @@ TERMINAL_STATUSES = (STATUS_DONE, STATUS_FAILED)
 # In-memory registry (fast path); JSON files are the durable source of truth.
 _jobs: dict[str, dict[str, Any]] = {}
 _lock = threading.Lock()
+_last_gc: float = 0.0
+
+# GC policy (v0.9.5): job files are historical records, not an archive.
+_GC_MAX_AGE_S = 30 * 24 * 3600  # 30 days
+_GC_MAX_FILES = 500
+_GC_MIN_INTERVAL_S = 3600  # at most one sweep per hour
+
+
+def _mutate(job: dict[str, Any], **fields: Any) -> None:
+    """Apply fields under the lock, persist a snapshot OUTSIDE the lock.
+
+    Readers holding the lock always see a consistent job state; file I/O
+    never blocks other threads (v0.9.5 concurrency fix).
+    """
+    with _lock:
+        job.update(fields)
+        snapshot = dict(job)
+    _persist(snapshot)
+
+
+def _gc_jobs() -> None:
+    """Bounded retention for persisted job files (best-effort, throttled).
+
+    Deletes files older than 30 days, then trims beyond the newest 500.
+    Jobs still in the in-memory registry are never touched.
+    """
+    global _last_gc
+    now = time.monotonic()
+    with _lock:
+        if now - _last_gc < _GC_MIN_INTERVAL_S:
+            return
+        _last_gc = now
+        live_ids = set(_jobs)
+    try:
+        import os
+
+        entries = [
+            (e.stat().st_mtime, e)
+            for e in os.scandir(_jobs_dir())
+            if e.name.endswith(".json") and e.name[:-5] not in live_ids
+        ]
+        entries.sort(reverse=True)  # newest first
+        wall_now = time.time()
+        for idx, (mtime, entry) in enumerate(entries):
+            if idx >= _GC_MAX_FILES or wall_now - mtime > _GC_MAX_AGE_S:
+                try:
+                    os.unlink(entry.path)
+                except OSError:
+                    pass
+    except OSError:  # noqa: PERF203 — GC must never break job creation
+        pass
 
 
 def _jobs_dir() -> Path:
@@ -83,24 +134,23 @@ def create_job(
     with _lock:
         _jobs[job_id] = job
     _persist(job)
+    _gc_jobs()
 
     def _run() -> None:
-        job["status"] = "running"
-        job["started_at"] = time.time()
-        _persist(job)
+        _mutate(job, status="running", started_at=time.time())
         try:
             result = target(job)
-            job["status"] = STATUS_DONE
-            job["stage"] = STATUS_DONE
-            job["result"] = result
+            _mutate(job, status=STATUS_DONE, stage=STATUS_DONE, result=result)
         except Exception as exc:  # noqa: BLE001 — job boundary must capture all
             logger.error("Job %s (%s) failed: %s", job_id, kind, exc)
-            job["status"] = STATUS_FAILED
-            job["stage"] = STATUS_FAILED
-            job["error"] = f"{type(exc).__name__}: {exc}"
+            _mutate(
+                job,
+                status=STATUS_FAILED,
+                stage=STATUS_FAILED,
+                error=f"{type(exc).__name__}: {exc}",
+            )
         finally:
-            job["finished_at"] = time.time()
-            _persist(job)
+            _mutate(job, finished_at=time.time())
 
     thread = threading.Thread(target=_run, name=f"job-{kind}-{job_id}", daemon=True)
     thread.start()
@@ -109,17 +159,15 @@ def create_job(
 
 def update_stage(job: dict[str, Any], stage: str, **extra: Any) -> None:
     """Update the current stage of a running job (called from within target)."""
-    job["stage"] = stage
-    job.update(extra)
-    _persist(job)
+    _mutate(job, stage=stage, **extra)
 
 
 def get_job(job_id: str) -> dict[str, Any] | None:
     """Look up a job by id — memory first, then disk (survives restarts)."""
     with _lock:
         job = _jobs.get(job_id)
-    if job is not None:
-        return job
+        if job is not None:
+            return dict(job)  # consistent snapshot, never the live dict
     path = _job_path(job_id)
     if path.exists():
         try:

@@ -7,6 +7,7 @@ audit rounds recorded in CHANGELOG 0.7.0).
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -419,3 +420,68 @@ def test_md201_exempts_running_furniture(tmp_path):
     issue = check_content_coverage(pdf, md)
     # All missing tokens are furniture -> exempt -> no issue (or info-level dust)
     assert issue is None or issue.severity == "info", issue and issue.message
+
+
+# ── v0.9.5: metadata contract + vault conflict protection ───────────────────
+
+
+def test_metadata_records_degraded_segments(tmp_path):
+    common = {
+        "title": "DS",
+        "doc_id": DOC,
+        "source_pdf": "x.pdf",
+        "pages": 2,
+        "tool_version": "0.9.5",
+        "summary": "Sum.",
+        "summary_source": "abstract",
+    }
+    info = assemble_package(
+        output_root=tmp_path / "out",
+        title="DS",
+        doc_id=DOC,
+        markdown_text="# B\n\nText.\n",
+        frontmatter='---\ntitle: "t"\n---\n\n',
+        images_dir=None,
+        tables=[],
+        chunks=_mk_chunks(),
+        qc_report={"verdict": "WARN"},
+        readme_kwargs={**common, "qc_verdict": "WARN"},
+        metadata_kwargs={
+            **common,
+            "conversion_params": {},
+            "heading_tree": [],
+            "dropped_headers": [],
+            "degraded_segments": [2, 3],
+        },
+    )
+    meta = json.loads(Path(info["metadata_path"]).read_text())
+    assert meta["degraded_segments"] == [2, 3]
+
+
+def test_vault_conflict_blocks_overwrite_by_default(tmp_path):
+    """v0.9.5: a diverged vault copy is refused, not clobbered."""
+    info = _assemble(tmp_path)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    r1 = export_package_to_vault(info["package_dir"], vault)
+    assert r1["ok"]
+    # user hand-edits the vault copy -> content_hash diverges
+    dest_meta = Path(r1["dest"]) / "data" / "metadata.json"
+    meta = json.loads(dest_meta.read_text())
+    meta["content_hash"] = "user-edited-divergence"
+    dest_meta.write_text(json.dumps(meta))
+
+    r2 = export_package_to_vault(info["package_dir"], vault)
+    assert not r2["ok"] and r2["conflict"]
+    r3 = export_package_to_vault(info["package_dir"], vault, overwrite=True)
+    assert r3["ok"] and not r3.get("skipped")
+
+
+def test_vault_unreadable_metadata_is_conflict(tmp_path):
+    info = _assemble(tmp_path)
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    r1 = export_package_to_vault(info["package_dir"], vault)
+    (Path(r1["dest"]) / "data" / "metadata.json").write_text("{corrupt")
+    r2 = export_package_to_vault(info["package_dir"], vault)
+    assert not r2["ok"] and r2["conflict"]

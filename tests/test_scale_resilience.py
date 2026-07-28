@@ -174,6 +174,37 @@ def test_restart_inference_services_signals_patterns(monkeypatch):
     assert killed == 2
     assert any("llama-server" in " ".join(c) for c in calls)
     assert any("surya" in " ".join(c) for c in calls)
+    # v0.9.5 blast-radius contract: every kill is scoped to the current user
+    import os as _os
+
+    uid = str(_os.getuid())
+    for c in calls:
+        assert "-u" in c and uid in c, c
+
+
+def test_restart_falls_back_when_anchored_misses(monkeypatch):
+    """Anchored llama pattern missing -> broad (still user-scoped) fallback."""
+    calls: list[list[str]] = []
+
+    class _R:
+        def __init__(self, rc):
+            self.returncode = rc
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd)
+        pattern = cmd[-1]
+        # anchored llama pattern (contains a path prefix) misses; broad hits
+        if "llama-server" in pattern and "(" in pattern:
+            return _R(1)
+        return _R(0)
+
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    assert marker_engine.restart_inference_services() == 2
+    llama_calls = [c for c in calls if "llama-server" in c[-1]]
+    assert len(llama_calls) == 2  # anchored attempt, then broad fallback
 
 
 # ── v0.9.4: segment breaker + honest degradation ────────────────────────────

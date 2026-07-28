@@ -63,7 +63,7 @@ mcp = FastMCP(
     instructions=(
         "PDF Capture Pipeline — multi-phase PDF document extraction service. "
         "Converts PDF to high-quality structured Markdown with formula recognition, "
-        "table extraction, layout cleaning, and quality control.\n\n"
+        "table extraction, and quality control.\n\n"
         "Quick start (tools work immediately, no setup required):\n"
         "- pdf_info: Get PDF metadata and page count.\n"
         "- classify_document: Detect document type.\n"
@@ -1023,6 +1023,9 @@ def _run_pipeline(
     # + Phase 3.5: cross-channel repair (repair-or-report)
     # + Phase 4: multi-dimensional QC gate
     _stage("qc")
+    # Hoisted out of the QC block (v0.9.5): with skip_qc=True the degraded
+    # info was silently lost from the package metadata.
+    degraded_segments = extract_report.metadata.get("degraded_segments") or []
     qc_verdict = "PASS"
     qc_report: dict[str, Any] = {}
     if not skip_qc and markdown_text:
@@ -1108,7 +1111,6 @@ def _run_pipeline(
         # Degraded segments (v0.9.4): part of the document was extracted by
         # the text-layer fallback — content preserved, layout fidelity
         # reduced. Never let that pass silently.
-        degraded_segments = extract_report.metadata.get("degraded_segments") or []
         if degraded_segments and qc_verdict == "PASS":
             qc_verdict = "WARN"
 
@@ -1213,6 +1215,7 @@ def _run_pipeline(
                     "summary_source": summary_source,
                     "heading_tree": build_heading_tree(markdown_text),
                     "dropped_headers": chunk_result["dropped_headers"],
+                    "degraded_segments": degraded_segments,
                 },
             )
         except Exception as exc:  # noqa: BLE001 — packaging must not kill conversion
@@ -1264,7 +1267,7 @@ def pdf_to_markdown(
     """Convert a PDF into a self-describing Markdown knowledge package.
 
     Pipeline: Engine extraction (marker/MinerU) -> table extraction (pdfplumber)
-    -> layout cleaning -> QC quality gate -> repair -> knowledge package.
+    -> QC quality gate -> repair -> knowledge package.
 
     Output (package=True, default) is a self-describing folder that drops
     into an Obsidian vault as a unit and that any LLM agent can understand
@@ -1301,7 +1304,8 @@ def pdf_to_markdown(
             replaced with an HTML <table> — only when the numeric-
             conservation gate passes (no invented numbers, no lost numbers).
             'auto' = on whenever a VLM is configured.
-        enable_tatr: Enable TATR deep-learning table structure detection (requires torch).
+        enable_tatr: DEPRECATED no-op in this pipeline; use the
+            extract_tables tool with strategy='tatr' instead.
         skip_qc: Skip quality gate (debug only).
         out_dir: Output directory (auto-created if empty).
         mode: 'auto' (async for large PDFs), 'sync' (always inline, may time
@@ -1327,6 +1331,11 @@ def pdf_to_markdown(
         Always includes `features` describing which deep capabilities ran.
     """
     try:
+        if enable_tatr:
+            logger.warning(
+                "enable_tatr is a deprecated no-op in pdf_to_markdown; "
+                "use extract_tables(strategy='tatr') instead."
+            )
         pdf = _resolve_pdf(pdf_path)
 
         if mode not in ("auto", "sync", "async"):
@@ -1397,7 +1406,9 @@ def pdf_to_markdown(
                 "hint": (
                     f"Conversion started in the background (~{estimated} min). "
                     f"Poll with get_job_status(job_id='{job['job_id']}'). "
-                    "When done, read the markdown from result_path."
+                    "Note: result_path is the RAW intermediate markdown; with "
+                    "package=True the final document is at the job result's "
+                    "markdown_path (inside the <slug>/ knowledge package)."
                 ),
             }
         )
@@ -1413,7 +1424,9 @@ def pdf_to_markdown(
 
 
 @mcp.tool()
-def export_to_obsidian(package_dir: str, vault_path: str, category: str = "") -> str:
+def export_to_obsidian(
+    package_dir: str, vault_path: str, category: str = "", overwrite: bool = False
+) -> str:
     """Copy a knowledge package into an Obsidian vault as a whole unit.
 
     The package folder produced by pdf_to_markdown is vault-ready: main md
@@ -1421,7 +1434,9 @@ def export_to_obsidian(package_dir: str, vault_path: str, category: str = "") ->
     document card. This tool copies the ENTIRE folder (never flattens,
     never rewrites links) into the vault, optionally under a category
     subfolder. Idempotent: skips when the vault already holds an identical
-    content_hash.
+    content_hash. If the vault copy DIVERGED (hand-edited or unreadable
+    metadata), the export is refused with conflict=True unless
+    overwrite=True — your vault edits are never silently clobbered (v0.9.5).
 
     Args:
         package_dir: Path to the knowledge package (contains data/metadata.json).
@@ -1434,7 +1449,9 @@ def export_to_obsidian(package_dir: str, vault_path: str, category: str = "") ->
     try:
         from pdf_capture_mcp.packaging import export_package_to_vault
 
-        return _json(export_package_to_vault(package_dir, vault_path, category))
+        return _json(
+            export_package_to_vault(package_dir, vault_path, category, overwrite=overwrite)
+        )
     except Exception as exc:  # noqa: BLE001 — tool boundary
         logger.error("export_to_obsidian failed: %s", traceback.format_exc())
         return _json({"ok": False, "error": str(exc)})
@@ -1730,6 +1747,8 @@ def batch_convert(
                         known[doc_id] = pkg_dir
                         if vault_path.strip():
                             exp = export_package_to_vault(pkg_dir, vault_path, category)
+                            if exp.get("conflict"):
+                                entry["vault_conflict"] = True
                             entry["vault"] = exp.get("dest", exp.get("error", ""))
                         if index:
                             from pdf_capture_mcp.rag_store import (

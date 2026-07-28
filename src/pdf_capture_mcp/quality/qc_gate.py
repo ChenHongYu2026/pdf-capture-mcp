@@ -76,8 +76,15 @@ def _assess_formula_integrity(text: str) -> float:
 
 
 def _assess_table_coverage(text: str, expected_tables: int = 0) -> float:
-    """Assess table extraction coverage."""
-    md_tables = len(re.findall(r"^\|.+\|$", text, re.MULTILINE)) // 3  # rough count
+    """Assess table extraction coverage.
+
+    Uses the shared table-block parser instead of the old row-count-/3
+    heuristic, which systematically undercounted multi-row tables and
+    produced false WARNs (v0.9.5 calibration).
+    """
+    from pdf_capture_mcp.quality.md_audit import _table_blocks
+
+    md_tables = len(_table_blocks(text.splitlines()))
     if expected_tables <= 0:
         return 1.0 if md_tables > 0 else 0.5
     return min(1.0, md_tables / max(expected_tables, 1))

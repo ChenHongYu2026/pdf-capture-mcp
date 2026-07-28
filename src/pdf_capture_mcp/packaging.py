@@ -268,6 +268,7 @@ def build_metadata(
     main_md_name: str,
     csv_mapping: list[dict[str, Any]],
     dropped_headers: list[str],
+    degraded_segments: list[int] | None = None,
 ) -> dict[str, Any]:
     files: list[dict[str, Any]] = []
     for rel in [main_md_name, "README.md", "data/chunks.jsonl", "data/qc_report.json"]:
@@ -294,6 +295,9 @@ def build_metadata(
         "manifest": files,
         "tables_csv": csv_mapping,  # N9: csv <-> page <-> nearest heading
         "dropped_running_headers": dropped_headers,
+        # v0.9.5: fulfil the 0.9.4 contract — degraded segments live in the
+        # package metadata too, not only in qc_report.
+        "degraded_segments": degraded_segments or [],
     }
 
 
@@ -420,7 +424,10 @@ def assemble_package(
 
 
 def export_package_to_vault(
-    package_dir: Path | str, vault_dir: Path | str, category: str = ""
+    package_dir: Path | str,
+    vault_dir: Path | str,
+    category: str = "",
+    overwrite: bool = False,
 ) -> dict[str, Any]:
     """Copy a knowledge package into an Obsidian vault as a whole unit.
 
@@ -438,6 +445,7 @@ def export_package_to_vault(
     dest = dest_parent / src.name
 
     if dest.exists():
+        diverged = True
         try:
             old = json.loads((dest / "data" / "metadata.json").read_text())["content_hash"]
             new = json.loads((src / "data" / "metadata.json").read_text())["content_hash"]
@@ -448,7 +456,20 @@ def export_package_to_vault(
                     "skipped": True,
                     "message": "Identical content already in vault (content_hash match).",
                 }
-        except Exception:  # noqa: BLE001 — unreadable: fall through to overwrite
+        except Exception:  # noqa: BLE001 — unreadable metadata counts as divergence
             pass
+        # v0.9.5: a diverged (possibly hand-edited) vault copy is never
+        # silently clobbered — that would destroy user edits.
+        if diverged and not overwrite:
+            return {
+                "ok": False,
+                "conflict": True,
+                "dest": str(dest),
+                "error": (
+                    "Vault already contains a diverged copy of this package "
+                    "(content_hash mismatch or unreadable metadata — possibly "
+                    "hand-edited). Pass overwrite=True to replace it."
+                ),
+            }
     shutil.copytree(src, dest, dirs_exist_ok=True)
     return {"ok": True, "dest": str(dest), "skipped": False}

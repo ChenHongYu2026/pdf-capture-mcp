@@ -18,13 +18,32 @@ from pdf_capture_mcp.config import get_logger
 
 logger = get_logger("embedding_client")
 
-_CONFIG_PATH = Path.home() / ".pdf_capture_mcp" / "embedding_config.json"
+_LEGACY_CONFIG_PATH = Path.home() / ".pdf_capture_mcp" / "embedding_config.json"
+
+
+def _config_path() -> Path:
+    """Config lives in the shared cache dir (v0.9.5 unification with the VLM
+    config); evaluated at call time so PDF_CAPTURE_CACHE_DIR is honored."""
+    from pdf_capture_mcp.config import get_cache_dir
+
+    return get_cache_dir() / "embedding_config.json"
 
 
 def _load_config() -> dict[str, Any]:
-    if _CONFIG_PATH.exists():
+    path = _config_path()
+    if not path.exists() and _LEGACY_CONFIG_PATH.exists():
+        # One-time lazy migration: COPY (never move/delete) the legacy file
+        # so a migration bug can never break a working RAG setup.
         try:
-            data = json.loads(_CONFIG_PATH.read_text(encoding="utf-8"))
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_LEGACY_CONFIG_PATH.read_text(encoding="utf-8"), encoding="utf-8")
+            path.chmod(0o600)
+            logger.info("Migrated embedding config from %s to %s", _LEGACY_CONFIG_PATH, path)
+        except OSError:
+            path = _LEGACY_CONFIG_PATH  # fall back to reading the legacy file
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, OSError):
@@ -33,10 +52,11 @@ def _load_config() -> dict[str, Any]:
 
 
 def _save_config(config: dict[str, Any]) -> None:
-    _CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    _CONFIG_PATH.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
+    path = _config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8")
     try:
-        _CONFIG_PATH.chmod(0o600)  # protect API key
+        path.chmod(0o600)  # protect API key
     except OSError:
         pass
 

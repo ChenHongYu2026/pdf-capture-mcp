@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from pdf_capture_mcp.config import get_logger
+from pdf_capture_mcp.config import get_cache_dir, get_logger
 from pdf_capture_mcp.types import ExtractReport
 
 logger = get_logger("engines.marker")
@@ -22,18 +22,42 @@ def restart_inference_services() -> int:
     Pilot forensics: one oversized document flooded the resident
     llama-server queue and every SUBSEQUENT document timed out against the
     backlog — the failure was contagious. marker re-spawns these services
-    on demand, so killing them is always safe. Returns processes signalled.
+    on demand. Returns the number of patterns that matched processes.
+
+    Blast radius (v0.9.5 security fix): kills are restricted to the
+    CURRENT USER (-u uid) and patterns are first anchored to our own
+    venv/cache paths; only a zero-match falls back to the broad pattern
+    (still user-scoped) so self-healing never silently loses coverage.
+    Unrelated system-wide processes are never touched.
     """
+    import os
+    import re as _re
     import subprocess
+    import sys
+
+    uid = str(os.getuid())
+    prefix = _re.escape(sys.prefix)
+    try:
+        cache = _re.escape(str(get_cache_dir()))
+    except Exception:  # noqa: BLE001 — cache dir is best-effort context
+        cache = prefix
+
+    def _pkill(pattern: str) -> bool:
+        try:
+            r = subprocess.run(["pkill", "-u", uid, "-f", pattern], capture_output=True, timeout=10)
+            return r.returncode == 0
+        except Exception:  # noqa: BLE001 — best-effort hygiene
+            return False
 
     killed = 0
-    for pattern in ("llama-server", "surya.[a-z_]*.server"):
-        try:
-            r = subprocess.run(["pkill", "-f", pattern], capture_output=True, timeout=10)
-            if r.returncode == 0:
-                killed += 1
-        except Exception:  # noqa: BLE001 — best-effort hygiene
-            pass
+    # surya helpers are spawned by THIS venv's interpreter: anchor to it.
+    if _pkill(prefix + r".*surya\.[a-z_]*\.server"):
+        killed += 1
+    # llama-server's binary location is not provable from here: try the
+    # anchored variants first, fall back to the broad (user-scoped) match.
+    if _pkill(f"({prefix}|{cache}).*llama-server") or _pkill("llama-server"):
+        killed += 1
+
     if killed:
         import time as _time
 

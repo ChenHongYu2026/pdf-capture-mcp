@@ -153,13 +153,14 @@ def sanitize_markdown(text: str) -> tuple[str, list[AuditIssue]]:
 
     span_lines = [i for i, line in enumerate(lines, 1) if _SPAN_PLACEHOLDER in line]
     if span_lines:
+        # Count BEFORE replacing — counting after always yields 0 (v0.9.5 fix).
+        n_spans = text.count(_SPAN_PLACEHOLDER)
         text = text.replace(_SPAN_PLACEHOLDER, "")
         fixes.append(
             AuditIssue(
                 rule="MD-106",
                 severity=SEVERITY_INFO,
-                message=f"Removed {text.count(_SPAN_PLACEHOLDER) or len(span_lines)} "
-                "empty <span></span> placeholder cell(s).",
+                message=f"Removed {n_spans} empty <span></span> placeholder cell(s).",
                 lines=span_lines,
                 suggestion="Fixed automatically; cells left blank.",
             )

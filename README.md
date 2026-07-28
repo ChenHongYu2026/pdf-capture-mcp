@@ -6,7 +6,7 @@
 
 Multi-phase PDF capture pipeline as an [MCP](https://modelcontextprotocol.io) server.
 Convert PDF documents into high-quality structured Markdown — with formula recognition,
-table extraction, layout cleaning, and a built-in quality gate.
+table extraction, and a built-in quality gate.
 
 [![CI](https://github.com/ChenHongYu2026/pdf-capture-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/ChenHongYu2026/pdf-capture-mcp/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
@@ -18,7 +18,7 @@ table extraction, layout cleaning, and a built-in quality gate.
   - [pymupdf4llm](https://github.com/pymupdf/pymupdf4llm) (built-in) — zero setup, fast, always available
   - [marker](https://github.com/datalab-to/marker) (recommended) — highest quality for complex layouts
   - [MinerU](https://github.com/opendatalab/MinerU) (optional) — best for multi-column/InDesign PDFs, auto-managed in an isolated venv
-- **9 MCP tools** — `pdf_to_markdown`, `get_job_status`, `download_models`, `extract_tables`, `classify_document`, `pdf_info`, `setup_vlm`, `check_environment`, `install_engine`
+- **14 MCP tools** — `pdf_to_markdown`, `get_job_status`, `download_models`, `extract_tables`, `classify_document`, `pdf_info`, `setup_vlm`, `check_environment`, `install_engine`
 - **Async job mode** — large PDFs convert in a background job (no MCP client timeouts); model downloads can be pre-fetched without time limits
 - **Optional VLM enhancement** — plug in any vision-capable model (Qwen-VL, GLM-4V, MiniMax, Moonshot, OpenAI, local Ollama…) for better table/formula extraction. **No extra dependencies needed** — works out of the box with the base install.
 - **Quality gate** — multi-dimensional QC (text completeness, heading structure, formula integrity, table coverage) **plus content-aware audit rules** that catch defects statistical checks miss (control chars, torn numeric columns, fused table headers, content loss)
@@ -356,7 +356,7 @@ marker (Apache-2.0), pdfplumber (MIT), Table Transformer (MIT), pymupdf4llm (Apa
   - [pymupdf4llm](https://github.com/pymupdf/pymupdf4llm)（内置）—— 零配置、快速、始终可用
   - [marker](https://github.com/datalab-to/marker)（推荐）—— 复杂版面提取质量最高
   - [MinerU](https://github.com/opendatalab/MinerU)（可选）—— 多栏/InDesign 排版最佳，自动管理独立虚拟环境
-- **9 个 MCP 工具** —— `pdf_to_markdown`、`get_job_status`、`download_models`、`extract_tables`、`classify_document`、`pdf_info`、`setup_vlm`、`check_environment`、`install_engine`
+- **14 个 MCP 工具** —— `pdf_to_markdown`、`get_job_status`、`download_models`、`extract_tables`、`classify_document`、`pdf_info`、`setup_vlm`、`check_environment`、`install_engine`
 - **异步任务模式** —— 大型 PDF 在后台任务中转换（不再触发 MCP 客户端超时）；模型可提前预下载，不受时间窗口限制
 - **可选 VLM 增强** —— 接入任何具备视觉能力的模型（通义千问 Qwen-VL、智谱 GLM-4V、MiniMax、月之暗面 Moonshot、OpenAI、本地 Ollama 等），提升表格/公式提取质量。**无需额外依赖**，基础安装即可使用。
 - **质量门控** —— 多维度 QC 评估（文本完整度、标题结构、公式完好率、表格覆盖率），**另含内容感知审计规则**，捕获统计指标无法发现的缺陷（控制字符、数值列撕裂、表头融合、内容丢失）
