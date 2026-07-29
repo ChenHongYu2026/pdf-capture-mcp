@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   batch_convert's old `index: bool = False` flips to 'auto' and the
   per-file child owns the indexing (no double work).
 
+### Fixed
+
+- Job persistence is now atomic (write-to-temp + rename). The old
+  truncate-write let get_job_status pollers read empty/partial JSON —
+  caught by this release's own CI run before it shipped.
+
 ## [0.11.3] - 2026-07-29
 
 ### Fixed

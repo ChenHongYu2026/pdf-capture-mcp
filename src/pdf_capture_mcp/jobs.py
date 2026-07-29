@@ -96,12 +96,22 @@ def _job_path(job_id: str) -> Path:
 
 
 def _persist(job: dict[str, Any]) -> None:
-    """Write job state to disk (best-effort; never raises)."""
+    """Atomically write job state to disk (best-effort; never raises).
+
+    Write-to-temp + rename: get_job_status polls this file from other
+    threads/processes at any moment, and a plain truncate-write hands
+    readers empty or partial JSON on fast runners (v0.12.0 CI catch).
+    The .tmp suffix keeps it invisible to the *.json globs of GC and
+    list_recent.
+    """
     try:
-        _job_path(job["job_id"]).write_text(
+        path = _job_path(job["job_id"])
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(
             json.dumps(job, ensure_ascii=False, indent=2, default=str),
             encoding="utf-8",
         )
+        tmp.replace(path)
     except OSError as exc:
         logger.warning("Failed to persist job %s: %s", job["job_id"], exc)
 
