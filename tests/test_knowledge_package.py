@@ -550,3 +550,108 @@ def test_vault_unreadable_metadata_is_conflict(tmp_path):
     (Path(r1["dest"]) / "data" / "metadata.json").write_text("{corrupt")
     r2 = export_package_to_vault(info["package_dir"], vault)
     assert not r2["ok"] and r2["conflict"]
+
+
+# ── v0.12.0: vector index as standard equipment ─────────────────────────────
+
+
+def _mini_pdf(path):
+    import fitz
+
+    doc = fitz.open()
+    page = doc.new_page()
+    for row in range(8):
+        page.insert_text((36, 60 + 16 * row), "auto index doctrine body text row")
+    doc.save(str(path))
+    doc.close()
+    return path
+
+
+def test_auto_index_runs_when_embedding_configured(tmp_path, monkeypatch):
+    """Configured embedding + packaged conversion -> index phase fires."""
+    from pdf_capture_mcp import server
+
+    calls: list[str] = []
+    monkeypatch.setattr("pdf_capture_mcp.embedding_client.is_embedding_enabled", lambda: True)
+    import pdf_capture_mcp.rag_store as rag_store
+
+    monkeypatch.setattr(
+        rag_store,
+        "build_vector_index",
+        lambda pkg: calls.append(str(pkg)) or {"ok": True, "embedded": 7},
+    )
+    result = server._run_pipeline(
+        _mini_pdf(tmp_path / "t.pdf"),
+        engine="pymupdf",
+        enable_formula=False,
+        out_dir=str(tmp_path / "out"),
+        package=True,
+    )
+    assert result["ok"]
+    assert len(calls) == 1 and calls[0] == result["package"]["package_dir"]
+    assert result["index"] == {"ok": True, "embedded": 7}
+    assert result["features"]["vector_index"]["enabled"] is True
+
+
+def test_auto_index_skipped_without_embedding(tmp_path, monkeypatch):
+    from pdf_capture_mcp import server
+
+    monkeypatch.setattr("pdf_capture_mcp.embedding_client.is_embedding_enabled", lambda: False)
+    import pdf_capture_mcp.rag_store as rag_store
+
+    monkeypatch.setattr(
+        rag_store, "build_vector_index", lambda pkg: (_ for _ in ()).throw(AssertionError)
+    )
+    result = server._run_pipeline(
+        _mini_pdf(tmp_path / "t.pdf"),
+        engine="pymupdf",
+        enable_formula=False,
+        out_dir=str(tmp_path / "out"),
+        package=True,
+    )
+    assert result["ok"] and result["index"] == {}
+    assert result["features"]["vector_index"]["enabled"] is False
+    assert "setup_embedding" in result["features"]["vector_index"]["reason"]
+
+
+def test_index_failure_never_kills_conversion(tmp_path, monkeypatch):
+    from pdf_capture_mcp import server
+
+    monkeypatch.setattr("pdf_capture_mcp.embedding_client.is_embedding_enabled", lambda: True)
+    import pdf_capture_mcp.rag_store as rag_store
+
+    def _boom(pkg):
+        raise RuntimeError("embedding API down")
+
+    monkeypatch.setattr(rag_store, "build_vector_index", _boom)
+    result = server._run_pipeline(
+        _mini_pdf(tmp_path / "t.pdf"),
+        engine="pymupdf",
+        enable_formula=False,
+        out_dir=str(tmp_path / "out"),
+        package=True,
+    )
+    assert result["ok"] is True  # conversion survives
+    assert result["index"]["ok"] is False
+    assert "embedding API down" in result["index"]["error"]
+
+
+def test_explicit_off_wins_over_configured_embedding(tmp_path, monkeypatch):
+    from pdf_capture_mcp import server
+
+    monkeypatch.setattr("pdf_capture_mcp.embedding_client.is_embedding_enabled", lambda: True)
+    import pdf_capture_mcp.rag_store as rag_store
+
+    monkeypatch.setattr(
+        rag_store, "build_vector_index", lambda pkg: (_ for _ in ()).throw(AssertionError)
+    )
+    result = server._run_pipeline(
+        _mini_pdf(tmp_path / "t.pdf"),
+        engine="pymupdf",
+        enable_formula=False,
+        out_dir=str(tmp_path / "out"),
+        package=True,
+        index="off",
+    )
+    assert result["ok"] and result["index"] == {}
+    assert result["features"]["vector_index"]["enabled"] is False
