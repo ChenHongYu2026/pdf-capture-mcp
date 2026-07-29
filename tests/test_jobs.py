@@ -237,3 +237,23 @@ def test_gc_is_throttled():
     _make_stale_file(d, "late-expired", 31 * 24 * 3600)
     _gc_jobs()  # within the hourly window: must be a no-op
     assert (d / "late-expired.json").exists()
+
+
+def test_list_recent_ignores_mtime_inversion(tmp_path):
+    """An older job persisting late (lock-free _mutate) must not outrank a
+    newer job — ordering follows created_at, not file mtime (v0.11.3)."""
+    import os
+
+    from pdf_capture_mcp.jobs import _job_path, create_job, list_recent
+
+    first = create_job("test", lambda j: {})
+    _wait_terminal(first["job_id"])
+    second = create_job("test", lambda j: {})
+    _wait_terminal(second["job_id"])
+
+    # Simulate the race: the OLDER job's file gets the newest mtime.
+    future = time.time() + 3600
+    os.utime(_job_path(first["job_id"]), (future, future))
+
+    ids = [j["job_id"] for j in list_recent()]
+    assert ids.index(second["job_id"]) < ids.index(first["job_id"])

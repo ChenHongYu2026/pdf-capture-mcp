@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.3] - 2026-07-29
+
+### Fixed
+
+- `list_recent` ordered jobs by file mtime, but `_mutate` persists
+  outside the registry lock — an older job finishing late could touch
+  its file after a newer job was created, flipping the order (stable
+  repro on fast Linux CI runners). Now ordered by the job's own
+  created_at.
+
 ## [0.11.2] - 2026-07-29
 
 ### Fixed
