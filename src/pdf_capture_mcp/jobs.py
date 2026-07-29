@@ -191,14 +191,21 @@ def get_job(job_id: str) -> dict[str, Any] | None:
 
 
 def list_recent(limit: int = 10) -> list[dict[str, Any]]:
-    """List the most recent jobs (from disk, newest first)."""
-    files = sorted(_jobs_dir().glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    """List the most recent jobs (from disk, newest first).
+
+    Ordered by the job's own created_at, NOT file mtime: _mutate persists
+    outside the registry lock, so an older job finishing can touch its
+    file AFTER a newer job was created — mtime ordering flipped on fast
+    CI runners (v0.11.3 fix). The file count is bounded by the jobs GC
+    (500 max), so reading everything before sorting is cheap.
+    """
     jobs: list[dict[str, Any]] = []
-    for path in files[:limit]:
+    for path in _jobs_dir().glob("*.json"):
         job = get_job(path.stem)
         if job is not None:
             jobs.append(job)
-    return jobs
+    jobs.sort(key=lambda j: float(j.get("created_at") or 0.0), reverse=True)
+    return jobs[:limit]
 
 
 def public_view(job: dict[str, Any]) -> dict[str, Any]:
