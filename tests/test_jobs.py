@@ -257,3 +257,17 @@ def test_list_recent_ignores_mtime_inversion(tmp_path):
 
     ids = [j["job_id"] for j in list_recent()]
     assert ids.index(second["job_id"]) < ids.index(first["job_id"])
+
+
+def test_persist_is_atomic_no_tmp_residue():
+    """Atomic write: readers never see partial JSON; no .tmp left behind."""
+    import json as json_mod
+
+    from pdf_capture_mcp.jobs import _job_path, create_job
+
+    job = create_job("test", lambda j: {})
+    _wait_terminal(job["job_id"])
+    path = _job_path(job["job_id"])
+    # File parses cleanly and the scratch file is gone.
+    json_mod.loads(path.read_text(encoding="utf-8"))
+    assert not path.with_suffix(".json.tmp").exists()

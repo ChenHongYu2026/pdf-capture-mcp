@@ -5,6 +5,27 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-07-29
+
+### Added
+
+- **Vector indexing is now standard equipment.** Same doctrine as the
+  v0.6.0 VLM features: configuring embedding (setup_embedding) IS the
+  opt-in. `pdf_to_markdown` and `batch_convert` gained a tri-state
+  `index` parameter defaulting to 'auto' — every packaged conversion is
+  indexed into the local Qdrant store automatically, incrementally
+  (content-addressed chunks are never re-embedded). Explicit 'off'
+  wins; index failures NEVER fail a finished conversion (reported in
+  the response `index` field and the `features.vector_index` block).
+  batch_convert's old `index: bool = False` flips to 'auto' and the
+  per-file child owns the indexing (no double work).
+
+### Fixed
+
+- Job persistence is now atomic (write-to-temp + rename). The old
+  truncate-write let get_job_status pollers read empty/partial JSON —
+  caught by this release's own CI run before it shipped.
+
 ## [0.11.3] - 2026-07-29
 
 ### Fixed

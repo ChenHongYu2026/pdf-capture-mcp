@@ -1161,6 +1161,7 @@ def _run_pipeline(
     enrich_figures: str | bool = "auto",
     package: bool = True,
     pages: list[int] | None = None,
+    index: str | bool = "auto",
     job: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the full conversion pipeline and return the response dict.
@@ -1181,8 +1182,14 @@ def _run_pipeline(
     # ── Feature resolution: 'auto' follows the configured VLM policy ──────
     # Configuring a VLM (setup_vlm) is itself the user's opt-in to spend
     # tokens on quality; 'auto' honors that intent, explicit bools override.
+    from pdf_capture_mcp.embedding_client import is_embedding_enabled
+
     vlm_on = is_vlm_enabled()
     policy = get_vlm_policy() if vlm_on else ""
+    embedding_on = is_embedding_enabled()
+    # Same doctrine as VLM features (v0.6.0): configuring embedding IS the
+    # opt-in — 'auto' indexes every packaged conversion (v0.12.0 standard).
+    index_on = _resolve_vlm_feature(index, vlm_on=embedding_on, policy_allows=True) and package
     table_enrich_on = _resolve_vlm_feature(
         enable_table_enrich, vlm_on=vlm_on, policy_allows=policy in ("full", "tables_only")
     )
@@ -1208,6 +1215,18 @@ def _run_pipeline(
                 else "VLM not configured — run setup_vlm to unlock"
                 if not vlm_on
                 else f"off (policy={policy or 'n/a'}); pass enrich_figures=True to force"
+            ),
+        },
+        "vector_index": {
+            "enabled": index_on,
+            "reason": (
+                "active (embedding configured — packages auto-index)"
+                if index_on
+                else "embedding not configured — run setup_embedding to unlock"
+                if not embedding_on
+                else "off (package=False)"
+                if not package
+                else "disabled by parameter"
             ),
         },
     }
@@ -1510,6 +1529,21 @@ def _run_pipeline(
             logger.warning("Package assembly failed: %s", exc)
             package_info = {"error": f"Package assembly failed: {exc}"}
 
+    # Phase 7: vector index (v0.12.0 standard equipment) — configuring
+    # embedding is the opt-in; incremental by content address, and a
+    # failed index NEVER kills a finished conversion (repair-or-report).
+    index_info: dict[str, Any] = {}
+    if index_on and package_info.get("package_dir"):
+        from pdf_capture_mcp.rag_store import build_vector_index as _build_index
+
+        _stage("indexing")
+        try:
+            index_info = _build_index(package_info["package_dir"])
+        except Exception as exc:  # noqa: BLE001 — indexing must not kill conversion
+            index_info = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        if not index_info.get("ok"):
+            logger.warning("Auto-index failed: %s", index_info.get("error"))
+
     return {
         "ok": qc_verdict != "HALT",
         "markdown_text": markdown_text,
@@ -1536,6 +1570,7 @@ def _run_pipeline(
         "elapsed_seconds": extract_report.elapsed_seconds,
         "vlm_notice": vlm_notice,
         "features": features,
+        "index": index_info,
         "missing_segments": missing_segments,
         **(
             {
@@ -1563,6 +1598,7 @@ def pdf_to_markdown(
     auto_repair: bool = True,
     enrich_figures: str = "auto",
     package: bool = True,
+    index: str = "auto",
 ) -> str:
     """Convert a PDF into a self-describing Markdown knowledge package.
 
@@ -1622,6 +1658,10 @@ def pdf_to_markdown(
             content becomes retrievable by text-only RAG (closes the MD-202
             gap). 'auto' = on when a VLM is configured with policy='full'.
             Consumes API tokens per figure.
+        index: 'auto' (default) indexes the finished package into the
+            vector store whenever embedding is configured (setup_embedding
+            is the opt-in — v0.12.0 standard equipment); 'on'/'off' force.
+            Index failures never fail the conversion.
         package: Assemble the knowledge package (chunks.jsonl, README,
             metadata, frontmatter, MD-110 cross-page table merge). Set
             False for the bare markdown-only layout of earlier versions.
@@ -1675,6 +1715,7 @@ def pdf_to_markdown(
             "enrich_figures": enrich_figures,
             "package": package,
             "pages": pages,
+            "index": index,
         }
 
         if not run_async:
@@ -1972,7 +2013,7 @@ def batch_convert(
     out_dir: str = "",
     vault_path: str = "",
     category: str = "",
-    index: bool = False,
+    index: str = "auto",
     engine: str = "auto",
     skip_existing: bool = True,
     per_file_timeout_minutes: int = 40,
@@ -1995,8 +2036,9 @@ def batch_convert(
             ~/Documents/pdf-capture).
         vault_path: If set, each package is copied into this Obsidian vault.
         category: Optional vault subfolder (used with vault_path).
-        index: If True and embedding is configured, each package is indexed
-            into the vector store after conversion.
+        index: 'auto' (default) indexes each package when embedding is
+            configured (v0.12.0 standard); 'on'/'off' force. Runs inside
+            the per-file child; failures never fail the file.
         engine: Extraction engine ('auto', 'marker', 'mineru').
         skip_existing: Skip PDFs whose doc_id already has a package.
         per_file_timeout_minutes: Circuit breaker — a document exceeding
@@ -2064,6 +2106,7 @@ def batch_convert(
                             "enable_formula": True,
                             "out_dir": out_dir,
                             "package": True,
+                            "index": index,
                         },
                         timeout_s=timeout_s,
                     )
@@ -2082,12 +2125,10 @@ def batch_convert(
                             if exp.get("conflict"):
                                 entry["vault_conflict"] = True
                             entry["vault"] = exp.get("dest", exp.get("error", ""))
-                        if index:
-                            from pdf_capture_mcp.rag_store import (
-                                build_vector_index as _build,
-                            )
-
-                            idx = _build(pkg_dir)
+                        # v0.12.0: indexing runs inside the pipeline child
+                        # (auto when embedding is configured) — report it.
+                        idx = result.get("index") or {}
+                        if idx:
                             entry["indexed"] = (
                                 idx.get("embedded", 0) if idx.get("ok") else idx.get("error")
                             )
