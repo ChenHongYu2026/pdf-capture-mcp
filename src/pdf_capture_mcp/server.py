@@ -775,7 +775,12 @@ def _ensure_healthy_stdin() -> None:
     try:
         os.fstat(0)
     except OSError:
-        os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+        devnull_fd = os.open(os.devnull, os.O_RDONLY)
+        try:
+            os.dup2(devnull_fd, 0)
+        finally:
+            if devnull_fd != 0:
+                os.close(devnull_fd)
 
 
 def _sync_inference_timeout(timeout_s: float) -> None:
@@ -976,6 +981,12 @@ def _extract_segmented(
         seg_images = seg_dir / "images"
         if seg_images.is_dir():
             for img in sorted(seg_images.iterdir()):
+                if img.name.startswith("._"):
+                    # macOS AppleDouble metadata on external volumes —
+                    # renaming would launder the '._' marker away and the
+                    # junk becomes indistinguishable from real images
+                    # (902-page audit: 714 laundered ghosts, one per figure).
+                    continue
                 new_name = f"{prefix}_{img.name}"
                 shutil.move(str(img), str(images_dir / new_name))
                 text = text.replace(f"images/{img.name}", f"images/{new_name}")

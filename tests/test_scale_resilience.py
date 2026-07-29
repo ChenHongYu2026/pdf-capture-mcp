@@ -656,3 +656,46 @@ def test_sync_inference_timeout_sets_and_respects_env(monkeypatch):
     monkeypatch.delenv("SURYA_INFERENCE_TIMEOUT_SECONDS", raising=False)
     _sync_inference_timeout(0)
     assert "SURYA_INFERENCE_TIMEOUT_SECONDS" not in os.environ
+
+
+def test_merge_skips_appledouble_junk(tmp_path):
+    """macOS ._* metadata must never be renamed into the shared images dir."""
+
+    class _JunkEngine(_FakeEngine):
+        def extract(self, pdf, out_dir, **kw):
+            report = super().extract(pdf, out_dir, **kw)
+            (Path(out_dir) / "images" / "._page_0_Figure_0.jpeg").write_bytes(b"j")
+            return report
+
+    report = _extract_segmented(
+        _JunkEngine(),
+        tmp_path / "big.pdf",
+        tmp_path / "ex",
+        200,
+        enable_formula=True,
+        stage_cb=lambda s: None,
+        _runner=_inline_runner,
+    )
+    assert report.ok
+    names = sorted(p.name for p in (tmp_path / "ex" / "images").iterdir())
+    assert not any("._" in n for n in names), names
+    assert report.image_count == 3  # junk not counted as content
+
+
+def test_ensure_healthy_stdin_does_not_leak_fds():
+    from pdf_capture_mcp.server import _ensure_healthy_stdin
+
+    def fd_count() -> int:
+        return len(os.listdir("/dev/fd"))
+
+    saved = os.dup(0)
+    try:
+        os.close(0)
+        before = fd_count()
+        _ensure_healthy_stdin()
+        # Exactly ONE new descriptor (the repaired fd 0) — the scratch
+        # /dev/null fd must have been closed after dup2.
+        assert fd_count() == before + 1
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
