@@ -192,7 +192,6 @@ def build_frontmatter(
 # ── README (the agent map — one read explains the whole package) ────────────
 
 
-
 def _tables_row(n_tables_csv: int) -> str:
     """File-map row for tables/ — omitted when no CSVs exist.
 
@@ -205,6 +204,7 @@ def _tables_row(n_tables_csv: int) -> str:
         f"\n| `tables/` | 表格 CSV，独立提取通道（{n_tables_csv} 个，命名含页码）"
         " | 表格数据交叉验证 |"
     )
+
 
 def build_readme(
     *,

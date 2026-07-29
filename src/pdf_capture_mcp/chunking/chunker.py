@@ -254,11 +254,7 @@ def _demote_footnote_headings(blocks: list[_Block]) -> list[_Block]:
     """
     out: list[_Block] = []
     for idx, block in enumerate(blocks):
-        if (
-            block.kind == "heading"
-            and block.level >= 4
-            and _FOOTNOTE_NUM.match(block.text)
-        ):
+        if block.kind == "heading" and block.level >= 4 and _FOOTNOTE_NUM.match(block.text):
             nxt = blocks[idx + 1] if idx + 1 < len(blocks) else None
             if nxt is not None and nxt.kind == "text" and nxt.lines:
                 nxt.lines[0] = f"{block.text}. {nxt.lines[0].lstrip()}"

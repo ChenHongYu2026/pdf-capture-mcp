@@ -7,6 +7,7 @@ queue contagion; a 115-minute single document eating the night budget).
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from pdf_capture_mcp.engines import marker_engine
@@ -575,3 +576,83 @@ def test_segment_timeout_env_override(monkeypatch):
     monkeypatch.delenv("PDF_CAPTURE_SEGMENT_TIMEOUT_S")
     importlib.reload(srv)
     assert srv.SEGMENT_TIMEOUT_S == 1200
+
+
+# ── v0.11.1: field lessons from the 902-page scanned-book run ──────────────
+
+
+def test_watch_parent_exits_on_reparent(monkeypatch):
+    """Reparenting (parent died) must trigger a hard exit."""
+    import threading
+    import time
+
+    from pdf_capture_mcp.server import _watch_parent
+
+    exited = threading.Event()
+    monkeypatch.setattr(os, "_exit", lambda code: exited.set())
+    # A parent pid that is guaranteed NOT ours -> loop exits immediately.
+    _watch_parent(parent_pid=os.getppid() + 99999, interval_s=0.01)
+    for _ in range(100):
+        if exited.is_set():
+            break
+        time.sleep(0.01)
+    assert exited.is_set()
+
+
+def test_watch_parent_stays_quiet_while_parent_alive(monkeypatch):
+    import threading
+    import time
+
+    from pdf_capture_mcp.server import _watch_parent
+
+    exited = threading.Event()
+    monkeypatch.setattr(os, "_exit", lambda code: exited.set())
+    _watch_parent(parent_pid=os.getppid(), interval_s=0.01)
+    time.sleep(0.2)
+    assert not exited.is_set()
+
+
+def test_ensure_healthy_stdin_repairs_dead_fd0():
+    """Closing fd 0 then calling the guard must restore a stat-able fd 0."""
+    from pdf_capture_mcp.server import _ensure_healthy_stdin
+
+    saved = os.dup(0)
+    try:
+        os.close(0)
+        _ensure_healthy_stdin()
+        os.fstat(0)  # must not raise
+    finally:
+        os.dup2(saved, 0)
+        os.close(saved)
+
+
+def test_ensure_healthy_stdin_noop_on_healthy_fd0():
+    from pdf_capture_mcp.server import _ensure_healthy_stdin
+
+    before = os.fstat(0)
+    _ensure_healthy_stdin()
+    after = os.fstat(0)
+    assert (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino)
+
+
+def test_sync_inference_timeout_sets_and_respects_env(monkeypatch):
+    from pdf_capture_mcp.server import _sync_inference_timeout
+
+    monkeypatch.delenv("SURYA_INFERENCE_TIMEOUT_SECONDS", raising=False)
+    _sync_inference_timeout(10800)
+    assert os.environ["SURYA_INFERENCE_TIMEOUT_SECONDS"] == "10800"
+
+    # Explicit user setting always wins.
+    monkeypatch.setenv("SURYA_INFERENCE_TIMEOUT_SECONDS", "1234")
+    _sync_inference_timeout(10800)
+    assert os.environ["SURYA_INFERENCE_TIMEOUT_SECONDS"] == "1234"
+
+    # Never below surya's own default.
+    monkeypatch.delenv("SURYA_INFERENCE_TIMEOUT_SECONDS", raising=False)
+    _sync_inference_timeout(30)
+    assert os.environ["SURYA_INFERENCE_TIMEOUT_SECONDS"] == "600"
+
+    # Zero/unset budget: leave the environment alone.
+    monkeypatch.delenv("SURYA_INFERENCE_TIMEOUT_SECONDS", raising=False)
+    _sync_inference_timeout(0)
+    assert "SURYA_INFERENCE_TIMEOUT_SECONDS" not in os.environ

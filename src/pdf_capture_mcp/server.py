@@ -743,16 +743,76 @@ SEGMENT_TIMEOUT_S = int(os.environ.get("PDF_CAPTURE_SEGMENT_TIMEOUT_S", "1200"))
 SEGMENT_READY_TIMEOUT_S = 300
 
 
+def _watch_parent(parent_pid: int, interval_s: float = 5.0) -> None:
+    """Daemon thread: hard-exit when the parent process dies.
+
+    902-page field lesson: killing the coordinator does NOT cascade to
+    spawned children (daemon=False because marker needs its own workers),
+    and an orphaned segment child kept writing into seg_* dirs for hours,
+    racing the successor run. Reparenting (getppid changes) is the death
+    signal.
+    """
+    import threading
+    import time as time_mod
+
+    def _loop() -> None:
+        while os.getppid() == parent_pid:
+            time_mod.sleep(interval_s)
+        os._exit(1)
+
+    threading.Thread(target=_loop, daemon=True, name="parent-watchdog").start()
+
+
+def _ensure_healthy_stdin() -> None:
+    """Re-anchor fd 0 to /dev/null when the inherited stdin has died.
+
+    902-page field lesson: nohup without `< /dev/null` leaves stdin on the
+    launching pty; once that pty is reclaimed, every spawned child dies in
+    the interpreter's init_sys_streams ("Bad file descriptor") before any
+    of our code runs. The parent must guarantee a healthy fd 0 BEFORE
+    spawning — the child cannot save itself.
+    """
+    try:
+        os.fstat(0)
+    except OSError:
+        os.dup2(os.open(os.devnull, os.O_RDONLY), 0)
+
+
+def _sync_inference_timeout(timeout_s: float) -> None:
+    """Align surya's OpenAI-client timeout with the segment budget.
+
+    902-page field lesson: surya's default 600 s client timeout mass-
+    expired every queued request of an 80-page OCR window long before the
+    segment budget did (13 consecutive APITimeoutErrors, zero output).
+    Must run before surya is imported — its settings snapshot the
+    environment at import time — so segment children call it first thing.
+    Explicit user settings always win (setdefault).
+    """
+    if timeout_s > 0:
+        os.environ.setdefault("SURYA_INFERENCE_TIMEOUT_SECONDS", str(int(max(timeout_s, 600))))
+
+
 def _segment_child(
-    engine_name: str, pdf_str: str, seg_dir_str: str, kwargs: dict[str, Any], queue: Any
+    engine_name: str,
+    pdf_str: str,
+    seg_dir_str: str,
+    kwargs: dict[str, Any],
+    queue: Any,
+    parent_pid: int = 0,
+    timeout_s: float = 0,
 ) -> None:
     """Subprocess entry for one segment (module-level for spawn).
 
     Emits a 'ready' sentinel once the engine models are warm (v0.10.0):
     every spawned segment reloads marker models from scratch (1-3 min),
     and on scanned documents that load must not eat the OCR budget.
+    v0.11.1: parent watchdog (orphan protection) + surya client timeout
+    aligned with the segment budget before anything imports surya.
     """
     try:
+        if parent_pid:
+            _watch_parent(parent_pid)
+        _sync_inference_timeout(timeout_s)
         from pdf_capture_mcp.engines import get_engine
 
         eng = get_engine(engine_name)
@@ -790,11 +850,12 @@ def _run_segment_isolated(
     import multiprocessing as mp
     import queue as queue_mod
 
+    _ensure_healthy_stdin()
     ctx = mp.get_context("spawn")
     q = ctx.Queue()
     proc = ctx.Process(
         target=_segment_child,
-        args=(eng.name, str(pdf), str(seg_dir), kwargs, q),
+        args=(eng.name, str(pdf), str(seg_dir), kwargs, q, os.getpid(), timeout_s),
         daemon=False,
     )
     proc.start()
@@ -1832,9 +1893,15 @@ def search_corpus(
 # engine state/memory is returned to the OS after every document.
 
 
-def _pipeline_child(pdf_str: str, kwargs: dict[str, Any], queue: Any) -> None:
-    """Subprocess entry (module-level for spawn picklability)."""
+def _pipeline_child(pdf_str: str, kwargs: dict[str, Any], queue: Any, parent_pid: int = 0) -> None:
+    """Subprocess entry (module-level for spawn picklability).
+
+    v0.11.1: parent watchdog — a batch coordinator dying must not leave
+    an orphaned conversion racing the next run's output directories.
+    """
     try:
+        if parent_pid:
+            _watch_parent(parent_pid)
         result = _run_pipeline(Path(pdf_str), **kwargs)
         result.pop("markdown_text", None)  # keep the pipe payload small
         queue.put(result)
@@ -1865,7 +1932,8 @@ def _run_pipeline_isolated(
     # daemon=False: this child runs marker, which spawns its own worker
     # processes — daemonic processes may not have children (v0.9.4 fix for
     # segmented extraction nested inside the batch per-file isolation).
-    proc = ctx.Process(target=target, args=(str(pdf), kwargs, q), daemon=False)
+    _ensure_healthy_stdin()
+    proc = ctx.Process(target=target, args=(str(pdf), kwargs, q, os.getpid()), daemon=False)
     proc.start()
     try:
         result: dict[str, Any] = q.get(timeout=timeout_s)

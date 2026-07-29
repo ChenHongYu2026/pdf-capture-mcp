@@ -5,6 +5,29 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.1] - 2026-07-29
+
+### Fixed
+
+Three process-lifecycle guards, each paying for a lesson the 902-page
+scanned-book field run taught the hard way, plus a version-desync fix
+(`__init__.__version__` was left at 0.10.0 by the 0.11.0 release, so
+tool responses reported the wrong generator version):
+
+- **Orphan watchdog**: segment and pipeline children now hard-exit when
+  reparented. Killing the coordinator never cascaded (daemon=False is
+  required for marker's own workers), and an orphaned segment child once
+  kept OCRing for 2.6 h, racing the successor run's seg_* dirs.
+- **stdin immunity**: the parent re-anchors a dead fd 0 to /dev/null
+  before every spawn. nohup without `< /dev/null` left stdin on the
+  launching pty; after pty reclaim every spawned child died in
+  init_sys_streams ("Bad file descriptor") before any Python ran.
+- **surya client-timeout sync**: segment children align
+  SURYA_INFERENCE_TIMEOUT_SECONDS with their segment budget before surya
+  is imported. The 600 s default mass-expired all queued requests of an
+  80-page OCR window (13 consecutive APITimeoutErrors, zero output)
+  while the segment budget was still fine. Explicit user settings win.
+
 ## [0.11.0] - 2026-07-28
 
 A post-import audit of a real Obsidian knowledge package surfaced the
