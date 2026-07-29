@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.2] - 2026-07-29
+
+### Fixed
+
+Final-audit findings from the 902-page field run:
+
+- `_merge_segment` renamed macOS AppleDouble junk (`._page_x.jpeg` ->
+  `s0_.__page_x.jpeg`), laundering the `._` marker away — the 902-page
+  package carried 714 ghost files (one per real figure) that no longer
+  looked like metadata. Junk is now skipped at merge time.
+- `_ensure_healthy_stdin` leaked the scratch /dev/null descriptor on
+  every repair (review finding); it is now closed after dup2.
+
 ## [0.11.1] - 2026-07-29
 
 ### Fixed
